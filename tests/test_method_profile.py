@@ -32,6 +32,16 @@ class OriginalEqualityTests(unittest.TestCase):
         cls, _ = self.make(slots=False)
         proof, _ = methods.prove(cls, cls.__eq__, cls.__ne__)
         self.assertTrue(proof["none_eq"])
+        self.assertTrue(proof["instance_eq_check"])
+        normal, overridden = cls(), cls()
+        overridden.__eq__ = lambda other: True
+        self.assertTrue(comparisons.TYPES[comparisons.describe(normal)]["none_ne"])
+        self.assertFalse(comparisons.TYPES[comparisons.describe(overridden)]["none_ne"])
+
+    def test_custom_dict_descriptor_prevents_instance_probe(self):
+        cls, _ = self.make(slots=False)
+        cls = type("CustomDictionary", (cls,), {"__dict__": property(lambda self: {})})
+        proof, _ = methods.prove(cls, cls.__eq__, cls.__ne__)
         self.assertFalse(proof["none_ne"])
 
     def test_replaced_code_or_type_global_revokes_cached_evidence(self):

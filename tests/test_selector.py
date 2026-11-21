@@ -342,6 +342,21 @@ class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
         selected, _ = self.selector().select(self.edit())
         self.assertEqual(selected, [])
 
+    def test_integer_ranges_cover_sites_beyond_the_snapshot_limit(self):
+        self.source = "def f(x):\n    return x > 0\n\ndef g():\n    return 2\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        self.map["files"]["sqlglot/demo.py"]["lines"]["2"] = 3
+        self.map["comparisons"] = {}
+        self.map["integer_profiled_tests"] = 3
+        data = {"global": False, "unknown": 0, "groups": [[1, 100000, 0, 0, 1], [0, 100000, 0, 0, 2]]}
+        self.map["integer_ranges"] = {"sqlglot/demo.py:2:11": data}
+        patch = patch_for(self.source, self.source.replace(" > ", " >= "))
+        self.assertEqual([t["number"] for t in self.selector().select(patch)[0]], [17])
+        data["unknown"] = 1
+        self.assertEqual(self.selector().select(patch)[0], self.tests)
+        data["unknown"], data["global"] = 0, True
+        self.assertEqual(self.selector().select(patch)[0], self.tests)
+
     def test_sparse_sets_keep_number_remapping(self):
         self.map["sets"] = [[], [0], [1], [0, 1]]
         self.map["comparisons"]["sqlglot/demo.py:2:11"]["global"] = True
@@ -353,6 +368,10 @@ class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
         self.map["comparisons"]["sqlglot/demo.py:2:11"]["pairs"] = [["custom", "none", 1]]
         self.assertEqual(self.selector().select(self.edit())[0], [])
         self.map["comparison_types"]["custom"]["proof_files"].append("sqlglot/demo.py")
+        self.assertEqual([t["number"] for t in self.selector().select(self.edit())[0]], [99])
+        self.map["comparison_types"]["custom"]["proof_spans"] = {"sqlglot/demo.py": [[20, 25]]}
+        self.assertEqual(self.selector().select(self.edit())[0], [])
+        self.map["comparison_types"]["custom"]["proof_spans"] = {"sqlglot/demo.py": [[1, 2]]}
         self.assertEqual([t["number"] for t in self.selector().select(self.edit())[0]], [99])
 
     def test_value_identity_does_not_assume_stable_interning(self):

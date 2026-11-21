@@ -14,6 +14,7 @@ import comparison_profile
 import dictionary_profile
 import attribute_loader
 import attribute_profile
+import integer_profile
 
 ROOT = Path(os.environ["BLAST_SOURCE"]).resolve()
 OUT = Path(os.environ["BLAST_RAW_MAP"]).resolve()
@@ -90,7 +91,7 @@ class MonitoringCoverage:
 
 
 COV = MonitoringCoverage() if hasattr(sys, "monitoring") and os.environ.get("BLAST_TRACER") != "coverage" else coverage.Coverage(data_file=str(OUT.with_suffix(".coverage")), source=[str(ROOT / "sqlglot"), str(ROOT / "tests")], config_file=False)
-if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY")):
+if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY")):
     COV = ReadOnlyCoverage()
 
 
@@ -142,7 +143,7 @@ def pytest_sessionstart(session):
 
 def pytest_collection_modifyitems(items):
     TESTS.extend(item.nodeid for item in items)
-    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY")):
+    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY")):
         return
     seen = set()
     for name, module in list(sys.modules.items()):

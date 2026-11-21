@@ -66,6 +66,22 @@ def compare(operation, left, right, alias=None):
     return OPERATIONS[operation](left, right)
 
 
+def interval_equivalent(operation, replacement, low, high, before, after, variable_left=True):
+    """Check all truth regions of two integer predicates over a closed interval."""
+    allowed = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE")
+    if operation not in allowed or replacement not in allowed or any(type(value) is not int for value in (low, high, before, after)) or low > high:
+        return False
+    points = {low, high}
+    for bound in (before, after):
+        points.update(value for value in (bound - 1, bound, bound + 1) if low <= value <= high)
+    for value in points:
+        left = (value, before) if variable_left else (before, value)
+        right = (value, after) if variable_left else (after, value)
+        if compare(operation, *left) != compare(replacement, *right):
+            return False
+    return True
+
+
 def dictionary_key_id(key):
     cls = type(key)
     if key is None:

@@ -1,5 +1,6 @@
 """Refresh type-state observations while retaining bounded primitive fixtures."""
 import json
+import hashlib
 from pathlib import Path
 import sys
 from map_format import decode_mask, compact_masks
@@ -28,11 +29,12 @@ def update_types(result, raw):
     eligible &= decode_mask(result["sets"][intern(completed)])
     result["comparison_profiled_tests"] = intern(name for name, i in numbers.items() if eligible & (1 << i))
     profile = raw["comparison_profile"]
-    result["comparison_types"].update({"linux_none:" + key: value for key, value in profile["types"].items()})
+    prefix = "none:" + hashlib.sha256(json.dumps(profile["types"], sort_keys=True).encode()).hexdigest()[:16] + ":"
+    result["comparison_types"].update({prefix + key: value for key, value in profile["types"].items()})
     for site, current in profile["sites"].items():
         data = result["comparisons"].setdefault(site, {"global": False})
         data["global"] = data["global"] or current["global"]
-        data["pairs"] = [["linux_none:" + a, "linux_none:" + b, intern(contexts)] for a, b, contexts in current["pairs"]]
+        data["pairs"] = [[prefix + a, prefix + b, intern(contexts)] for a, b, contexts in current["pairs"]]
     result["provenance"]["type_validation"] = "independent pristine Linux pass; original equality-method AST and live type-state guards; no changed operation evaluated"
     compact_masks(result)
 

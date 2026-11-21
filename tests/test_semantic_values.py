@@ -8,11 +8,28 @@ import tempfile
 import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from semantic_values import snapshot, restore, compare, dictionary_key_id
+from semantic_values import snapshot, restore, compare, dictionary_key_id, interval_equivalent
 from selector import semantic_changes
 from selector import Selector, PIN
 from tools import dictionary_profile
 from tools import comparison_profile
+
+
+class IntegerIntervalTests(unittest.TestCase):
+    def test_exhaustive_small_domains_match_enumeration(self):
+        operations = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE")
+        for low, high in ((-5, 5), (0, 0), (2, 6), (-6, -2)):
+            for a in operations:
+                for b in operations:
+                    for before in range(-7, 8):
+                        for after in range(-7, 8):
+                            for left in (True, False):
+                                expected = all((compare(a, n, before) == compare(b, n, after)) if left else (compare(a, before, n) == compare(b, after, n)) for n in range(low, high + 1))
+                                self.assertEqual(interval_equivalent(a, b, low, high, before, after, left), expected, (a, b, low, high, before, after, left))
+
+    def test_identity_and_non_integer_values_are_rejected(self):
+        self.assertFalse(interval_equivalent("Is", "Eq", 0, 1, 0, 0))
+        self.assertFalse(interval_equivalent("Lt", "Lt", 0.0, 1, 0, 0))
 
 
 class PrimitiveFixtureTests(unittest.TestCase):

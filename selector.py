@@ -13,7 +13,7 @@ import re
 import sys
 import tokenize
 import types
-from semantic_values import compare, restore, snapshot, dictionary_key_id
+from semantic_values import compare, restore, snapshot, dictionary_key_id, interval_equivalent
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -304,6 +304,35 @@ class Selector:
             raise ValueError("unsafe patch path")
         return self.source.joinpath(*relative.parts).read_text("utf-8")
 
+    def integer_equivalent_tests(self, site, comparison, replacement):
+        profile = self.map.get("integer_ranges", {}).get(site)
+        if not profile or profile["global"]:
+            return 0
+
+        def integer(node):
+            try:
+                value = ast.literal_eval(node)
+                return value if type(value) is int else None
+            except (ValueError, TypeError, SyntaxError, RecursionError):
+                return None
+
+        old_left, old_right = comparison.left, comparison.comparators[0]
+        new_left, new_right = replacement.left, replacement.comparators[0]
+        if ast.dump(old_left) == ast.dump(new_left) and integer(old_right) is not None and integer(new_right) is not None:
+            variable_left, before, after = True, integer(old_right), integer(new_right)
+        elif ast.dump(old_right) == ast.dump(new_right) and integer(old_left) is not None and integer(new_left) is not None:
+            variable_left, before, after = False, integer(old_left), integer(new_left)
+        else:
+            return 0
+        safe = self.mask(self.map.get("integer_profiled_tests")) & ~self.mask(profile["unknown"])
+        operation, changed = type(comparison.ops[0]).__name__, type(replacement.ops[0]).__name__
+        for low_left, high_left, low_right, high_right, contexts in profile["groups"]:
+            low, high = (low_left, high_left) if variable_left else (low_right, high_right)
+            constant = (low_right, high_right) if variable_left else (low_left, high_left)
+            if constant != (before, before) or not interval_equivalent(operation, changed, low, high, before, after, variable_left):
+                safe &= ~self.mask(contexts)
+        return safe
+
     def equivalent_tests(self, path, before, after):
         changes = semantic_changes(before, after)
         if not changes:
@@ -311,6 +340,13 @@ class Selector:
         profiled = self.mask(self.map.get("comparison_profiled_tests"))
         safe = self.all
         types = self.map.get("comparison_types", {})
+
+        def proof_unchanged(description):
+            if path not in description.get("proof_files", []):
+                return True
+            spans = description.get("proof_spans", {}).get(path)
+            return bool(spans) and not any(start <= node.end_lineno and node.lineno <= end for _, node, _ in changes for start, end in spans)
+
         for kind, comparison, replacement in changes:
             site = f"{path}:{comparison.lineno}:{comparison.col_offset}"
             if kind == "attribute":
@@ -333,8 +369,12 @@ class Selector:
                 safe &= ~affected
                 continue
             profile = self.map.get("comparisons", {}).get(site)
-            if not profile or profile["global"] or not profile["pairs"]:
+            if profile and profile["global"]:
                 return 0
+            integer_safe = self.integer_equivalent_tests(site, comparison, replacement)
+            if not profile or not profile["pairs"]:
+                safe &= integer_safe
+                continue
             operands_same = ast.dump(comparison.left) == ast.dump(replacement.left) and ast.dump(comparison.comparators[0]) == ast.dump(replacement.comparators[0])
             op, new_op = type(comparison.ops[0]).__name__, type(replacement.ops[0]).__name__
             matching = (op, new_op) in (("Is", "Eq"), ("Eq", "Is"), ("IsNot", "NotEq"), ("NotEq", "IsNot"))
@@ -350,7 +390,7 @@ class Selector:
                     equivalent = True
                 equality = op in ("Is", "Eq")
                 for none_type, custom in ((types[left], types[right]), (types[right], types[left])):
-                    if none_type.get("name") == "builtins:NoneType" and custom.get("kind") == "custom_none" and path not in custom.get("proof_files", []):
+                    if none_type.get("name") == "builtins:NoneType" and custom.get("kind") == "custom_none" and proof_unchanged(custom):
                         equivalent = bool(custom.get("none_eq") if equality else custom.get("none_ne"))
                 if not equivalent:
                     type_safe &= ~self.mask(contexts)
@@ -379,7 +419,7 @@ class Selector:
                         equivalent = False
                     if not equivalent:
                         value_safe &= ~self.mask(contexts)
-            safe &= type_safe | value_safe
+            safe &= type_safe | value_safe | integer_safe
         return safe
 
     def body_callers(self, info, before, after):
@@ -391,14 +431,18 @@ class Selector:
         scopes = {scope["name"]: scope for scope in info["scopes"] if scope["kind"] == "function"}
         if any(name not in scopes or scopes[name].get("global_call") for name in changed):
             return None
+        callers = 0
+        for name in changed:
+            callers |= self.mask(scopes[name]["coverage"])
+        if callers:
+            # Only the zero-call case changes selection. Avoid recompiling
+            # two whole modules for an executed function's ordinary edit.
+            return callers
         try:
             if code_layout(before) != code_layout(after):
                 return None
         except (SyntaxError, ValueError, RecursionError):
             return None
-        callers = 0
-        for name in changed:
-            callers |= self.mask(scopes[name]["coverage"])
         return callers
 
     def select_file(self, change, allow_equivalence=True):

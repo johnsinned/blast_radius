@@ -8,10 +8,11 @@ import sys
 import os
 from semantic_values import OPERATIONS, snapshot, BUILTIN_NONE_EQUALITY_TYPES
 try:
-    from . import dictionary_profile, method_profile
+    from . import dictionary_profile, method_profile, integer_profile
 except ImportError:
     import dictionary_profile
     import method_profile
+    import integer_profile
 
 CURRENT = lambda: ""
 SITES = {}
@@ -19,6 +20,8 @@ TYPES = {}
 TYPE_CACHE = {}
 HELPER = "__blast_original_identity_comparison__"
 DICT_HELPER = "__blast_original_dictionary__"
+INTEGER_HELPER = "__blast_integer_comparison__"
+IMPORT_DEPTH = 0
 
 
 def describe(value):
@@ -53,23 +56,29 @@ def describe(value):
         # Different definitions during tests are kept as distinct type states.
         signature = str(len(TYPE_CACHE)) + ":" + name + ":" + kind
         TYPES[signature] = description
-        checks = [(d, d.get("__eq__"), d.get("__ne__"), d.get("__getattribute__")) for d in dictionaries]
+        checks = [(d, d.get("__eq__"), d.get("__ne__"), d.get("__getattribute__"), d.get("__dict__")) for d in dictionaries]
         if cls is type(None) or cls is object or kind in ("unsupported", "builtin_value"):
             checks = []
         TYPE_CACHE[key] = signature, canonical, mro, checks, guards
     signature, canonical, mro, checks, guards = TYPE_CACHE[key]
-    if checks and (type.__getattribute__(cls, "__mro__") is not mro or any(d.get("__eq__") is not eq or d.get("__ne__") is not ne or d.get("__getattribute__") is not getattribute for d, eq, ne, getattribute in checks)) or any((namespace.get(name, expected) if isinstance(namespace, dict) else getattr(namespace, name)) is not expected for namespace, name, expected in guards):
+    if checks and (type.__getattribute__(cls, "__mro__") is not mro or any(d.get("__eq__") is not eq or d.get("__ne__") is not ne or d.get("__getattribute__") is not getattribute or d.get("__dict__") is not descriptor for d, eq, ne, getattribute, descriptor in checks)) or any((namespace.get(name, expected) if isinstance(namespace, dict) else getattr(namespace, name)) is not expected for namespace, name, expected in guards):
         signature += ":modified"
         TYPES[signature] = {"name": TYPES[signature.removesuffix(":modified")]["name"], "kind": "unsupported"}
         return signature
     if canonical is not None and id(value) not in canonical:
         signature += ":noncanonical"
         TYPES[signature] = {"name": TYPES[signature.removesuffix(":noncanonical")]["name"], "kind": "unsupported"}
+    if TYPES[signature].get("instance_eq_check"):
+        namespace = object.__getattribute__(value, "__dict__")
+        if type(namespace) is not dict or "__eq__" in namespace:
+            original = TYPES[signature]
+            signature += ":instance-eq"
+            TYPES[signature] = {**original, "none_ne": False}
     return signature
 
 
 def probe(site, operation, left, right):
-    context = CURRENT()
+    context = "" if IMPORT_DEPTH else CURRENT()
     record = SITES.setdefault(site, {"global": False, "pairs": {}, "values": {}, "unknown": set()})
     if context:
         pair = (describe(left), describe(right))
@@ -103,7 +112,7 @@ class Instrument(ast.NodeTransformer):
 
     def visit_Dict(self, node):
         self.generic_visit(node)
-        if self.function_depth or os.environ.get("BLAST_TYPES_ONLY") == "1":
+        if self.function_depth or os.environ.get("BLAST_TYPES_ONLY") == "1" or os.environ.get("BLAST_RANGES_ONLY") == "1":
             return node
         site = f"{self.relative}:{node.lineno}:{node.col_offset}"
         return ast.copy_location(ast.Call(func=ast.Name(id=DICT_HELPER, ctx=ast.Load()), args=[ast.Constant(site), node], keywords=[]), node)
@@ -114,11 +123,17 @@ class Instrument(ast.NodeTransformer):
             return node
         if len(node.ops) != 1:
             return node
-        if os.environ.get("BLAST_TYPES_ONLY") == "1" and not (isinstance(node.ops[0], (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)) and any(isinstance(value, ast.Constant) and value.value is None for value in (node.left, node.comparators[0]))):
-            return node
+        helper = HELPER
+        if os.environ.get("BLAST_TYPES_ONLY") == "1" or os.environ.get("BLAST_RANGES_ONLY") == "1":
+            none_site = os.environ.get("BLAST_TYPES_ONLY") == "1" and isinstance(node.ops[0], (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)) and any(isinstance(value, ast.Constant) and value.value is None for value in (node.left, node.comparators[0]))
+            integer_site = os.environ.get("BLAST_RANGES_ONLY") == "1" and integer_profile.supported(node)
+            if not none_site and not integer_site:
+                return node
+            if integer_site:
+                helper = INTEGER_HELPER
         site = f"{self.relative}:{node.lineno}:{node.col_offset}"
         operation = type(node.ops[0]).__name__
-        return ast.copy_location(ast.Call(func=ast.Name(id=HELPER, ctx=ast.Load()), args=[ast.Constant(site), ast.Constant(operation), node.left, node.comparators[0]], keywords=[]), node)
+        return ast.copy_location(ast.Call(func=ast.Name(id=helper, ctx=ast.Load()), args=[ast.Constant(site), ast.Constant(operation), node.left, node.comparators[0]], keywords=[]), node)
 
 
 class Loader(importlib.abc.Loader):
@@ -135,6 +150,7 @@ class Loader(importlib.abc.Loader):
         return self.filename
 
     def exec_module(self, module):
+        global IMPORT_DEPTH
         source = self.get_source(module.__name__)
         relative = Path(self.filename).resolve().relative_to(self.root).as_posix()
         original = ast.parse(source, filename=self.filename)
@@ -144,9 +160,14 @@ class Loader(importlib.abc.Loader):
         ast.fix_missing_locations(tree)
         module.__dict__[HELPER] = probe
         module.__dict__[DICT_HELPER] = dictionary_profile.observe
+        module.__dict__[INTEGER_HELPER] = integer_profile.probe
         code = compile(tree, self.filename, "exec", dont_inherit=True)
         method_profile.register(original, code, relative, module.__dict__)
-        exec(code, module.__dict__)
+        IMPORT_DEPTH += 1
+        try:
+            exec(code, module.__dict__)
+        finally:
+            IMPORT_DEPTH -= 1
 
 
 class Finder(importlib.abc.MetaPathFinder):
@@ -166,13 +187,14 @@ def install(root, current):
     global CURRENT
     CURRENT = current
     dictionary_profile.CURRENT = current
+    integer_profile.CURRENT = lambda: "" if IMPORT_DEPTH else CURRENT()
     if any(name == "sqlglot" or name.startswith("sqlglot.") for name in sys.modules):
         raise RuntimeError("identity profiles require instrumentation before importing sqlglot")
     sys.meta_path.insert(0, Finder(root))
 
 
 def export():
-    return {"types": TYPES, "sites": {site: {"global": value["global"], "pairs": [[left, right, sorted(contexts)] for (left, right), contexts in value["pairs"].items()], "values": [[a, b, alias, sorted(contexts)] for (a, b, alias), contexts in value["values"].items()], "unknown": sorted(value["unknown"])} for site, value in SITES.items()}}
+    return {"integer_ranges": integer_profile.export(), "types": TYPES, "sites": {site: {"global": value["global"], "pairs": [[left, right, sorted(contexts)] for (left, right), contexts in value["pairs"].items()], "values": [[a, b, alias, sorted(contexts)] for (a, b, alias), contexts in value["values"].items()], "unknown": sorted(value["unknown"])} for site, value in SITES.items()}}
 
 
 def is_import_read():

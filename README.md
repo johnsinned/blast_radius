@@ -16,14 +16,14 @@ with zero misses; the previous submission scored **106.308 s** on these samples.
 The current candidate adds independently measured class-setting reads, guarded
 unused-function handling, and source-checked equality behavior against None.
 It scores **105.688 s simulated** with zero sample misses. Under the competition's
-Docker restrictions it used **1.339 s Python CPU**, approximately **107.027 s total**.
+Docker restrictions it used **1.244 s Python CPU**, approximately **106.932 s total**.
 This includes a small CPU measurement wrapper. The repository remains below the
 20 MB limit.
 
-The submitted commit `1ed5c95ffcb82cd49e8cd903c4328f75ce299b3b` scored **198.0 s**
-on the hidden practice batch: 196.844 s simulated, about 1.13 s CPU, and no misses.
+The submitted commit `91e35ea4a1ada5713c713c2856339b85b0f655b1` scored **172.9 s**
+on the hidden practice batch: 171.379 s simulated, about 1.51 s CPU, and no misses.
 The current candidate has not yet been scored on that hidden batch. Its sample
-score cannot establish whether it beats the 136.1 s practice leader.
+score cannot establish whether it beats the 130.1 s practice leader.
 
 The clean Linux baseline passed 1,620 tests and 25,440 subtests, with one expected
 SQLite skip and process-pool serialization included. Setting reads were measured
@@ -46,7 +46,18 @@ pruning. Function-body edits can avoid file-wide fallback when the function was
 never called; signatures, docstrings, code flags, local/closure layouts, and
 import-time calls are checked first. Custom equality is used only where the
 original loaded method has a conservative short-circuit proof against None,
-with live method/global guards and a patch dependency on the proof's source file.
+with live method/global guards. Custom inequality also checks for instance-level
+equality overrides when objects have dictionaries. All equality definitions in
+the pinned proof files are protected against patch changes, allowing unrelated
+methods in the same file to use the proof. Identical type summaries are merged;
+distinct enum class identities remain distinct.
+
+Integer comparisons against literal bounds additionally record enclosing min/max
+ranges per test. Runtime checks require predicate agreement over every integer
+in those ranges, including values never observed. Noninteger or oversized values
+and import-time dependencies disable this pruning. This avoids a dependence on
+the bounded primitive fixture limit. Compilation of unused-body metadata is
+skipped when a function was executed, because that case cannot prune tests.
 
 The entire AST edit must be covered by these checks, and the commit must change
 one file. Missing profiles, oversized or nonprimitive inputs, overloaded methods,
@@ -59,13 +70,18 @@ values and reads are recorded; the incoming patch is interpreted only at runtime
 No patch-to-answer or edit-kind-to-failure table is stored. Evidence is empirical
 and depends on the test environment. The map is collected from the pinned source;
 an independent baseline pass verifies dictionary/file reads without predicate
-instrumentation. All **69 focused regression tests** pass in the pinned Linux image.
+instrumentation. All **73 focused regression tests** pass in the pinned Linux image,
+including 64,800 interval cases checked against direct enumeration.
 Three fresh boundary mutations were also checked against real time-format tests;
 the selector retained all failures found in that bounded validation.
 Five additional fresh mutations were checked against the complete Linux suite:
 three setting changes produced 9, 3, and 6 failing numbered tests respectively,
 all retained; a None-equality change and an unused public function-body change
 produced no failures. These development results are not embedded in the map.
+Two further fresh inequality changes, in expression hashing and table generation,
+passed the complete Linux suite. The old selector chose batches costing 25.656 s
+and 27.454 s for those edits; the current candidate chooses zero tests. These
+bounded examples do not predict the hidden batch's composition or score.
 
 The default Docker entrypoint has been tested as nobody, without a network, with
 a read-only filesystem, 64 MB temporary directory, 2 CPUs, and the scorer's memory
@@ -129,6 +145,11 @@ python tools/collect_map.py .work/sqlglot --reads-only --output .work/reads.json
 python tools/apply_read_map.py maps/dependencies.json .work/reads.json
 python tools/collect_map.py .work/sqlglot --attributes-only --output .work/attributes.json
 python tools/apply_attribute_map.py maps/dependencies.json .work/attributes.json
+python tools/collect_map.py .work/sqlglot --types-only --ranges-only --output .work/semantic.json
+python tools/apply_type_map.py maps/dependencies.json .work/semantic.json
+python tools/apply_range_map.py maps/dependencies.json .work/semantic.json
+python tools/attach_proof_spans.py maps/dependencies.json .work/sqlglot
+python tools/compact_profiles.py maps/dependencies.json
 ```
 
 The collection plugin executes process-pool jobs synchronously with input/output

@@ -72,16 +72,21 @@ def prove(cls, eq, ne):
 
     if evaluate(expression) is not False:
         return None
-    ne_safe, paths = ne is object.__ne__, [record[2]]
+    ne_safe, instance_check, paths = ne is object.__ne__, False, [record[2]]
     ne_info = method(ne)
     getattribute = next((type.__getattribute__(base, "__dict__")["__getattribute__"] for base in type.__getattribute__(cls, "__mro__") if "__getattribute__" in type.__getattribute__(base, "__dict__")), None)
-    if ne_info and type.__getattribute__(cls, "__dictoffset__") == 0 and getattribute is object.__getattribute__:
+    if ne_info and getattribute is object.__getattribute__:
         ne_record, a, b, body = ne_info
         expected = ast.parse(f"not {a}.__eq__({b})", mode="eval").body
         if ast.dump(body) == ast.dump(expected):
-            ne_safe = True
-            paths.append(ne_record[2])
+            descriptor = next((type.__getattribute__(base, "__dict__")["__dict__"] for base in type.__getattribute__(cls, "__mro__") if "__dict__" in type.__getattribute__(base, "__dict__")), None)
+            if type.__getattribute__(cls, "__dictoffset__") == 0:
+                ne_safe = True
+            elif type(descriptor) is types.GetSetDescriptorType and descriptor.__name__ == "__dict__":
+                ne_safe, instance_check = True, True
+            if ne_safe:
+                paths.append(ne_record[2])
     guards = [(namespace, "type", builtins.type), (eq.__builtins__, "type", builtins.type), (eq, "__code__", eq.__code__)]
     if ne_safe and isinstance(ne, types.FunctionType):
         guards.append((ne, "__code__", ne.__code__))
-    return {"none_eq": True, "none_ne": ne_safe, "proof_files": sorted(set(paths))}, guards
+    return {"none_eq": True, "none_ne": ne_safe, "instance_eq_check": instance_check, "proof_files": sorted(set(paths))}, guards
