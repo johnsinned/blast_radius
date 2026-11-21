@@ -14,10 +14,11 @@ import sys
 import tokenize
 import types
 from semantic_values import compare, restore, snapshot, dictionary_key_id, interval_equivalent
-from bytecode_model import changed_offsets, code_key, fingerprint, layout, walk_codes
+from bytecode_model import aligned_changes, changed_offsets, code_key, fingerprint, layout, walk_codes
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+UNSET = object()
 
 
 @dataclass
@@ -284,6 +285,8 @@ class Selector:
         self.all = (1 << len(tests)) - 1
         self.cache = {}
         self.value_cache = {}
+        self.original_trees = {}
+        self.compiled_originals = {}
         self.map = json.loads(map_path.read_text("utf-8")) if map_path.exists() else None
         if self.map and self.map.get("pin") != PIN:
             raise ValueError("dependency map targets a different sqlglot commit")
@@ -458,10 +461,11 @@ class Selector:
             safe &= type_safe | value_safe | integer_safe
         return safe
 
-    def body_callers(self, info, before, after):
+    def body_callers(self, info, before, after, changed=UNSET):
         if not self.map.get("global_functions_tracked"):
             return None
-        changed = changed_function_bodies(before, after)
+        if changed is UNSET:
+            changed = changed_function_bodies(before, after)
         if not changed:
             return None
         scopes = {scope["name"]: scope for scope in info["scopes"] if scope["kind"] == "function"}
@@ -481,11 +485,12 @@ class Selector:
             return None
         return callers
 
-    def bytecode_tests(self, path, before, after):
+    def bytecode_tests(self, path, before, after, changed=UNSET):
         profile = self.map.get("bytecode_profile")
         if not profile or profile["python"] != list(sys.version_info[:2]):
             return None
-        changed = changed_function_bodies(before, after)
+        if changed is UNSET:
+            changed = changed_function_bodies(before, after)
         if not changed:
             return None
 
@@ -512,7 +517,9 @@ class Selector:
         if headers(before) != headers(after):
             return None
         try:
-            old = list(walk_codes(compile(before, "<blast-radius-analysis>", "exec", dont_inherit=True)))
+            if before not in self.compiled_originals:
+                self.compiled_originals[before] = list(walk_codes(compile(before, "<blast-radius-analysis>", "exec", dont_inherit=True)))
+            old = self.compiled_originals[before]
             new = list(walk_codes(compile(after, "<blast-radius-analysis>", "exec", dont_inherit=True)))
             shape = lambda code: (code.co_qualname, code.co_flags, code.co_varnames, code.co_freevars, code.co_cellvars)
             if [shape(code) for code in old] != [shape(code) for code in new]:
@@ -533,7 +540,9 @@ class Selector:
                     continue
                 offsets = changed_offsets(a, b)
                 if offsets is None:
-                    return None
+                    offsets = aligned_changes(a, b)
+                    if offsets is None:
+                        return None
                 _, blocks = layout(a)
                 for offset in offsets:
                     entry = record["blocks"].get(str(blocks[offset]))
@@ -586,13 +595,18 @@ class Selector:
                 return self.all, "source encoding change"
             # Parsing bytes honors Python encoding cookies, which can make an
             # apparently comment-only edit change executable code.
-            before, after = ast.parse(source.encode("utf-8")), ast.parse(patched.encode("utf-8"))
+            cached = self.original_trees.get(change.path)
+            if cached is None or cached[0] != source:
+                cached = source, ast.parse(source.encode("utf-8"))
+                self.original_trees[change.path] = cached
+            before, after = cached[1], ast.parse(patched.encode("utf-8"))
         except (SyntaxError, ValueError, OSError, RecursionError, UnicodeError):
             return self.all, "syntax or patch fallback"
         if ast.dump(before, include_attributes=False) == ast.dump(after, include_attributes=False):
             return reads, "same Python AST"
         equivalent = self.equivalent_tests(change.path, before, after) if allow_equivalence else 0
-        body_callers = self.body_callers(info, before, after)
+        changed_bodies = changed_function_bodies(before, after)
+        body_callers = self.body_callers(info, before, after, changed_bodies)
         if body_callers == 0:
             return reads, "unchanged function metadata; bodies not executed"
 
@@ -620,7 +634,7 @@ class Selector:
                     return self.all, "import-time structural change"
         result = result or self.mask(info["coverage"]) or self.all
         reason = "baseline dependencies"
-        refined = self.bytecode_tests(change.path, before, after)
+        refined = self.bytecode_tests(change.path, before, after, changed_bodies)
         if refined is not None:
             result = (result & refined) | reads
             reason = "pristine basic-block dependencies"

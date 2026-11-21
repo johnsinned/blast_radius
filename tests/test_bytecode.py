@@ -1,14 +1,62 @@
 import ast
 import difflib
 import json
+import itertools
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
-from bytecode_model import fingerprint, walk_codes
+from bytecode_model import aligned_changes, changed_offsets, fingerprint, walk_codes
 from selector import PIN, Selector
 from tools.block_coverage import BlockCoverage
+
+
+class AlignmentWitnessTests(unittest.TestCase):
+    def test_changed_outcomes_have_an_executed_divergence_witness(self):
+        expressions = ("a", "b", "c", "a and b", "a or b", "(a and b) or c", "a and (b or c)", "(a if b else c)", "max(a, b)", "a + b", "bool(a and b)", "a == b", "not b", "None", "(b or None)", "b < c")
+        codes = []
+        inputs = list(itertools.product((False, True), repeat=3)) + list(itertools.product((-1, 0, 2), repeat=3))
+        for expression in expressions:
+            namespace = {}
+            source = f"def f(a, b, c):\n if a:\n  return {expression}\n return max(b, c)\n"
+            exec(compile(source, "alignment-fixture", "exec"), namespace)
+            fn = namespace["f"]
+            runs = []
+            for args in inputs:
+                executed = {0}
+                def trace(frame, event, argument):
+                    if frame.f_code is fn.__code__:
+                        frame.f_trace_opcodes = True
+                        executed.add(frame.f_lasti)
+                        return trace
+                    return None
+                try:
+                    sys.settrace(trace)
+                    value = fn(*args)
+                    outcome = (type(value), value)
+                except Exception as error:
+                    outcome = (type(error), str(error))
+                finally:
+                    sys.settrace(None)
+                runs.append((outcome, executed))
+            codes.append((fn.__code__, runs))
+        witnesses = 0
+        for old, old_runs in codes:
+            for new, new_runs in codes:
+                changed = aligned_changes(old, new)
+                if changed is None: continue
+                for (before, reached), (after, _) in zip(old_runs, new_runs):
+                    if before != after:
+                        self.assertTrue(reached.intersection(changed), (old.co_consts, new.co_consts, before, after, changed, reached))
+                        witnesses += 1
+        self.assertGreater(witnesses, 1000)
+
+    def test_exception_regions_generators_and_layout_changes_keep_fallback(self):
+        for source, after in (("def f(x):\n try:\n  return x\n except ValueError:\n  return None\n", "def f(x):\n try:\n  return not x\n except ValueError:\n  return None\n"), ("def f(x):\n yield x\n", "def f(x):\n yield not x\n"), ("def f(x):\n return x\n", "def f(x):\n y=x\n return y\n")):
+            old = compile(source, "demo", "exec").co_consts[0]
+            new = compile(after, "demo", "exec").co_consts[0]
+            self.assertIsNone(aligned_changes(old, new))
 
 
 @unittest.skipUnless(hasattr(sys, "monitoring"), "requires CPython monitoring")
@@ -34,8 +82,10 @@ class InstructionSelectionTests(unittest.TestCase):
             if call_globally:
                 namespace["f"](True, True, False)
             self.context = "A"
+            coverage.switch_context(self.context)
             namespace["f"](False, True, True)
             self.context = "B"
+            coverage.switch_context(self.context)
             namespace["f"](True, True, False)
         finally:
             coverage.stop()
@@ -86,6 +136,22 @@ class InstructionSelectionTests(unittest.TestCase):
         selector = self.make_selector()
         selector.map["bytecode_profile"]["python"] = [0, 0]
         self.assertEqual(self.select(selector, self.source.replace("b and c", "b or c")), ["A", "B"])
+
+    def test_inserted_condition_in_nested_return_keeps_only_reaching_tests(self):
+        self.source = "def f(a, b, c):\n    if a:\n        return max(b, c)\n    return 0\n"
+        selector = self.make_selector()
+        after = self.source.replace("max(b, c)", "max(b or c, c)")
+        old = list(walk_codes(compile(self.source, "demo", "exec")))[1]
+        new = list(walk_codes(compile(after, "demo", "exec")))[1]
+        self.assertIsNone(changed_offsets(old, new))
+        self.assertIsNotNone(aligned_changes(old, new))
+        self.assertEqual(self.select(selector, after), ["B"])
+
+    def test_inserted_entry_work_retains_every_caller(self):
+        self.source = "def f(a, b, c):\n    if a:\n        return max(b, c)\n    return 0\n"
+        selector = self.make_selector()
+        after = self.source.replace("    if a:", "    max(b, c)\n    if a:")
+        self.assertEqual(self.select(selector, after), ["A", "B"])
 
 
 if __name__ == "__main__":
