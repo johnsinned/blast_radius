@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--attributes-only", action="store_true", help="measure literal class-setting reads independently")
     parser.add_argument("--types-only", action="store_true", help="refresh operand types without snapshots or coverage")
     parser.add_argument("--ranges-only", action="store_true", help="record integer ranges at comparisons with literal bounds")
+    parser.add_argument("--blocks-only", action="store_true", help="record pristine interpreter basic-block execution")
+    parser.add_argument("--factories-only", action="store_true", help="record returned-closure users for pure factories")
     args = parser.parse_args()
     source, output = args.source.resolve(), args.output.resolve()
     if args.archive:
@@ -35,6 +37,8 @@ def main():
     env["BLAST_ATTRIBUTES_ONLY"] = "1" if args.attributes_only else "0"
     env["BLAST_TYPES_ONLY"] = "1" if args.types_only else "0"
     env["BLAST_RANGES_ONLY"] = "1" if args.ranges_only else "0"
+    env["BLAST_BLOCKS_ONLY"] = "1" if args.blocks_only else "0"
+    env["BLAST_FACTORIES_ONLY"] = "1" if args.factories_only else "0"
     with output.with_suffix(".log").open("w", encoding="utf-8") as log:
         run = subprocess.run([sys.executable, "-m", "pytest", "-p", "coverage_plugin", "-v", "--tb=short", "tests", *args.pytest_args], cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)
     print(f"pytest exit={run.returncode}; map={output}; log={output.with_suffix('.log')}")

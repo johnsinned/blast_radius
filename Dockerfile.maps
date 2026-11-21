@@ -5,6 +5,7 @@ COPY requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir -r requirements.lock coverage==7.13.4
 COPY tools /app/tools
 COPY semantic_values.py /app/semantic_values.py
+COPY bytecode_model.py /app/bytecode_model.py
 RUN python tools/fetch_source.py /opt/sqlglot
 FROM environment AS collect
 # fetch_source uses a source archive, so create no git dependency: verify
@@ -20,6 +21,11 @@ RUN python tools/apply_type_map.py /export/dependencies.json /app/semantic.json
 RUN python tools/apply_range_map.py /export/dependencies.json /app/semantic.json
 RUN python tools/attach_proof_spans.py /export/dependencies.json /opt/sqlglot
 RUN python tools/compact_profiles.py /export/dependencies.json
+RUN python tools/collect_map.py /opt/sqlglot --archive --blocks-only --output /app/blocks.json --timeout 1800
+RUN python tools/apply_block_map.py /export/dependencies.json /app/blocks.json
+RUN python tools/complete_static_codes.py /export/dependencies.json /opt/sqlglot
+RUN python tools/collect_map.py /opt/sqlglot --archive --factories-only --output /app/factories.json --timeout 1800
+RUN python tools/apply_factory_map.py /export/dependencies.json /app/factories.json
 
 FROM scratch AS export
 COPY --from=collect /export/ /

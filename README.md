@@ -9,19 +9,20 @@ It tries all worker counts from 1 through 8 using integer-millisecond costs.
 
 No sample answers, patch hashes, or tables of edit kinds are used by the selector
 or map builder. Sample answers are read only by development scoring tools.
-The submitted image has only the selector, the baseline map, and pinned source.
+The submitted image has only the selector and its helpers, the baseline map,
+and pinned source.
 
 On the 30 downloaded sample commits, the original starter scores **1,210.470 s**
-with zero misses; the previous submission scored **106.308 s** on these samples.
-The current candidate adds independently measured class-setting reads, guarded
-unused-function handling, and source-checked equality behavior against None.
-It scores **105.688 s simulated** with zero sample misses. Under the competition's
-Docker restrictions it used **1.244 s Python CPU**, approximately **106.932 s total**.
+with zero misses; the previous submission scored **105.688 s** on these samples.
+The current candidate adds interpreter basic-block coverage and returned-callback
+dependencies to the existing line, setting, and semantic profiles.
+It scores **101.627 s simulated** with zero sample misses. Under the competition's
+Docker restrictions it used **1.850 s Python CPU**, approximately **103.477 s total**.
 This includes a small CPU measurement wrapper. The repository remains below the
 20 MB limit.
 
-The submitted commit `91e35ea4a1ada5713c713c2856339b85b0f655b1` scored **172.9 s**
-on the hidden practice batch: 171.379 s simulated, about 1.51 s CPU, and no misses.
+The submitted commit `7f134833f89ae9ac4f70d1160f60a20ec0ae2ce6` scored **172.8 s**
+on the hidden practice batch: 171.379 s simulated, about 1.41 s CPU, and no misses.
 The current candidate has not yet been scored on that hidden batch. Its sample
 score cannot establish whether it beats the 130.1 s practice leader.
 
@@ -59,6 +60,26 @@ and import-time dependencies disable this pruning. This avoids a dependence on
 the bounded primitive fixture limit. Compilation of unused-body metadata is
 skipped when a function was executed, because that case cannot prune tests.
 
+The instruction pass observes pristine CPython execution without rewriting
+source or bytecode. For edits within existing function bodies, the runtime can
+intersect the ordinary selection with tests entering blocks containing changed
+instructions. Every instruction within an entered block is treated as executed.
+Interpreter version, original-code fingerprint, function metadata, local/closure
+layout, instruction offsets, exception tables, stack size, and import-time
+execution are guarded. Unsupported changes retain the ordinary selection.
+Earlier jump changes caused by operator precedence are included in the diff.
+The static index includes functions whose definitions execute but whose bodies do
+not. Source readers and tests lacking complete profiles remain selected.
+
+Pure factory calls in module/class initialization additionally track consumers of
+the returned function, distinguishing closures by their actual captured objects.
+The factory must consist only of a nested function definition and its return;
+callback metadata must not depend on factory inputs. All creations require
+matching observed returns, and unknown closure environments are retained
+conservatively. Factory source spans are protected. Literal argument edits can
+then select only callback users, including entries within inherited dispatch
+dictionaries. Import-time callback consumers disable this pruning.
+
 The entire AST edit must be covered by these checks, and the commit must change
 one file. Missing profiles, oversized or nonprimitive inputs, overloaded methods,
 uncertain identity/interning, changed operand computations, and unrelated edits
@@ -70,7 +91,7 @@ values and reads are recorded; the incoming patch is interpreted only at runtime
 No patch-to-answer or edit-kind-to-failure table is stored. Evidence is empirical
 and depends on the test environment. The map is collected from the pinned source;
 an independent baseline pass verifies dictionary/file reads without predicate
-instrumentation. All **73 focused regression tests** pass in the pinned Linux image,
+instrumentation. All **85 focused regression tests** pass in the pinned Linux image,
 including 64,800 interval cases checked against direct enumeration.
 Three fresh boundary mutations were also checked against real time-format tests;
 the selector retained all failures found in that bounded validation.
@@ -82,6 +103,11 @@ Two further fresh inequality changes, in expression hashing and table generation
 passed the complete Linux suite. The old selector chose batches costing 25.656 s
 and 27.454 s for those edits; the current candidate chooses zero tests. These
 bounded examples do not predict the hidden batch's composition or score.
+Five fresh changes validate the instruction/callback layer against the complete
+Linux suite: the parser change selected all 4 failures from a former selection
+of 1,334 tests; the generator change retained all 3 failures; a used callback
+retained both failures; the optimizer and unused-callback changes had no failures.
+No validation results or mutant outputs are consumed by the selector.
 
 The default Docker entrypoint has been tested as nobody, without a network, with
 a read-only filesystem, 64 MB temporary directory, 2 CPUs, and the scorer's memory
@@ -97,6 +123,9 @@ With Python 3.13 or newer, run:
 python tools/evaluate.py --verbose
 python -m unittest discover -s tests -v
 ```
+
+Instruction profiles require a matching interpreter. Use Docker to reproduce
+the reported Linux/Python 3.13 score; other versions keep the ordinary fallback.
 
 To recreate the source checkout on a different machine:
 
@@ -150,6 +179,11 @@ python tools/apply_type_map.py maps/dependencies.json .work/semantic.json
 python tools/apply_range_map.py maps/dependencies.json .work/semantic.json
 python tools/attach_proof_spans.py maps/dependencies.json .work/sqlglot
 python tools/compact_profiles.py maps/dependencies.json
+python tools/collect_map.py .work/sqlglot --blocks-only --output .work/blocks.json
+python tools/apply_block_map.py maps/dependencies.json .work/blocks.json
+python tools/complete_static_codes.py maps/dependencies.json .work/sqlglot
+python tools/collect_map.py .work/sqlglot --factories-only --output .work/factories.json
+python tools/apply_factory_map.py maps/dependencies.json .work/factories.json
 ```
 
 The collection plugin executes process-pool jobs synchronously with input/output

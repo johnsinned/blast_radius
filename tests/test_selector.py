@@ -276,6 +276,36 @@ class AttributeSelectionTests(DependencyFixture, unittest.TestCase):
         self.assertEqual(self.select_edit(), self.tests)
 
 
+class FactorySelectionTests(DependencyFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.source = "callback = factory(target=True)\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        info = self.map["files"]["sqlglot/demo.py"]
+        info.update(scopes=[], statements=[[1, 1, 1]], lines={}, assignments=[{"start": 1, "end": 1, "users": 3}])
+        self.profile = {"eligible": True, "global": False, "users": 1, "proof": {"path": "sqlglot/factory.py", "span": [1, 5]}}
+        self.map.update(factory_profiled_tests=3, factories={"sqlglot/demo.py:1:11": self.profile})
+
+    def edit(self):
+        return patch_for(self.source, self.source.replace("True", "False"))
+
+    def test_only_consumers_of_the_returned_callback_are_selected(self):
+        self.assertEqual([t["number"] for t in self.selector().select(self.edit())[0]], [99])
+
+    def test_callback_literals_inside_dispatch_dictionary_spreads(self):
+        self.source = "callback = {**base, 'key': factory(target=True)}\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        self.map["factories"] = {"sqlglot/demo.py:1:27": self.profile}
+        self.assertEqual([t["number"] for t in self.selector().select(self.edit())[0]], [99])
+
+    def test_global_consumers_and_factory_source_edits_disable_pruning(self):
+        self.profile["global"] = True
+        self.assertEqual(self.selector().select(self.edit())[0], self.tests)
+        self.profile["global"] = False
+        self.profile["proof"]["path"] = "sqlglot/demo.py"
+        self.assertEqual(self.selector().select(self.edit())[0], self.tests)
+
+
 class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()

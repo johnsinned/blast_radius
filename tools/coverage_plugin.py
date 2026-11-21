@@ -15,6 +15,8 @@ import dictionary_profile
 import attribute_loader
 import attribute_profile
 import integer_profile
+from block_coverage import BlockCoverage
+from factory_coverage import FactoryCoverage
 
 ROOT = Path(os.environ["BLAST_SOURCE"]).resolve()
 OUT = Path(os.environ["BLAST_RAW_MAP"]).resolve()
@@ -93,6 +95,10 @@ class MonitoringCoverage:
 COV = MonitoringCoverage() if hasattr(sys, "monitoring") and os.environ.get("BLAST_TRACER") != "coverage" else coverage.Coverage(data_file=str(OUT.with_suffix(".coverage")), source=[str(ROOT / "sqlglot"), str(ROOT / "tests")], config_file=False)
 if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY")):
     COV = ReadOnlyCoverage()
+if os.environ.get("BLAST_BLOCKS_ONLY") == "1":
+    COV = BlockCoverage(ROOT, lambda: CURRENT)
+if os.environ.get("BLAST_FACTORIES_ONLY") == "1":
+    COV = FactoryCoverage(ROOT, lambda: CURRENT)
 
 
 def relative(path):
@@ -134,7 +140,7 @@ CONSTRUCTED = set()
 def pytest_sessionstart(session):
     if os.environ.get("BLAST_ATTRIBUTES_ONLY") == "1":
         attribute_loader.install(ROOT, lambda: CURRENT)
-    elif os.environ.get("BLAST_COVERAGE_ONLY") != "1":
+    elif all(os.environ.get(name) != "1" for name in ("BLAST_COVERAGE_ONLY", "BLAST_BLOCKS_ONLY", "BLAST_FACTORIES_ONLY")):
         comparison_profile.install(ROOT, lambda: CURRENT)
     concurrent.futures.ProcessPoolExecutor = TracedExecutor
     COV.start()
@@ -143,7 +149,7 @@ def pytest_sessionstart(session):
 
 def pytest_collection_modifyitems(items):
     TESTS.extend(item.nodeid for item in items)
-    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY")):
+    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY", "BLAST_BLOCKS_ONLY", "BLAST_FACTORIES_ONLY")):
         return
     seen = set()
     for name, module in list(sys.modules.items()):
@@ -201,4 +207,4 @@ def pytest_sessionfinish(session, exitstatus):
         name = relative(filename)
         if name:
             lines[name] = {str(n): cs for n, cs in data.contexts_by_lineno(filename).items() if any(cs)}
-    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "attribute_imports_tracked": True, "attribute_profile": attribute_profile.export(), "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export(), "global_functions_tracked": hasattr(COV, "global_functions"), "global_functions": sorted(getattr(COV, "global_functions", []))}, separators=(",", ":")), encoding="utf-8")
+    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "bytecode_profile": COV.export() if isinstance(COV, BlockCoverage) else {}, "factory_profile": COV.export() if isinstance(COV, FactoryCoverage) else {}, "attribute_imports_tracked": True, "attribute_profile": attribute_profile.export(), "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export(), "global_functions_tracked": hasattr(COV, "global_functions"), "global_functions": sorted(getattr(COV, "global_functions", []))}, separators=(",", ":")), encoding="utf-8")

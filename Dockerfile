@@ -5,6 +5,7 @@ FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf107
 COPY tools/fetch_source.py /app/fetch_source.py
 RUN python /app/fetch_source.py /opt/sqlglot
 COPY selector.py /app/selector.py
+COPY bytecode_model.py /app/bytecode_model.py
 COPY semantic_values.py /app/semantic_values.py
 COPY maps/dependencies.json /app/maps/dependencies.json
 ENV PYTHONDONTWRITEBYTECODE=1

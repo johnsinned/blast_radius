@@ -14,6 +14,7 @@ import sys
 import tokenize
 import types
 from semantic_values import compare, restore, snapshot, dictionary_key_id, interval_equivalent
+from bytecode_model import changed_offsets, code_key, fingerprint, layout, walk_codes
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -190,8 +191,19 @@ def semantic_changes(before, after):
                     return False
                 changes.append(("comparison", a, b))
                 return True
+            if isinstance(a, ast.Call) and not equal(a, b) and equal(a.func, b.func) and len(a.args) == len(b.args) and len(a.keywords) == len(b.keywords) and all(x.arg == y.arg and x.arg is not None for x, y in zip(a.keywords, b.keywords)) and not any(isinstance(arg, ast.Starred) for arg in a.args + b.args):
+                try:
+                    for old, new in [*zip(a.args, b.args), *((x.value, y.value) for x, y in zip(a.keywords, b.keywords))]:
+                        if not equal(old, new):
+                            literal(old)
+                            literal(new)
+                except (ValueError, TypeError, SyntaxError, RecursionError):
+                    pass
+                else:
+                    changes.append(("factory", a, b))
+                    return True
             if isinstance(a, ast.Dict) and not equal(a, b):
-                if len(a.keys) != len(b.keys) or any(x is None or y is None or not equal(x, y) for x, y in zip(a.keys, b.keys)):
+                if len(a.keys) != len(b.keys) or any((x is None) != (y is None) or (x is not None and not equal(x, y)) for x, y in zip(a.keys, b.keys)):
                     return False
                 try:
                     keys = [dictionary_key_id(literal(key)) for key in a.keys]
@@ -202,9 +214,13 @@ def semantic_changes(before, after):
                             literal(old)
                             literal(new)
                 except (ValueError, TypeError, SyntaxError, RecursionError):
-                    return False
-                changes.append(("dictionary", a, b))
-                return True
+                    # A dictionary value may contain a separately supported
+                    # factory-call edit, alongside unchanged dictionary spreads.
+                    # Keep traversing when whole-value evidence cannot be used.
+                    pass
+                else:
+                    changes.append(("dictionary", a, b))
+                    return True
             return all(same(value, getattr(b, key)) for key, value in ast.iter_fields(a))
         if isinstance(a, list):
             return isinstance(b, list) and len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
@@ -349,6 +365,15 @@ class Selector:
 
         for kind, comparison, replacement in changes:
             site = f"{path}:{comparison.lineno}:{comparison.col_offset}"
+            if kind == "factory":
+                profile = self.map.get("factories", {}).get(site)
+                if not profile or not profile["eligible"] or profile["global"]:
+                    return 0
+                proof = profile["proof"]
+                if path == proof["path"] and any(proof["span"][0] <= node.end_lineno and node.lineno <= proof["span"][1] for _, node, _ in changes):
+                    return 0
+                safe &= self.mask(self.map.get("factory_profiled_tests")) & ~self.mask(profile["users"])
+                continue
             if kind == "attribute":
                 profile = self.map.get("attributes", {}).get(site)
                 if not profile or not profile["eligible"] or profile["global"]:
@@ -445,6 +470,70 @@ class Selector:
             return None
         return callers
 
+    def bytecode_tests(self, path, before, after):
+        profile = self.map.get("bytecode_profile")
+        if not profile or profile["python"] != list(sys.version_info[:2]):
+            return None
+        changed = changed_function_bodies(before, after)
+        if not changed:
+            return None
+
+        def headers(tree):
+            result = []
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                fields = []
+                for key, value in ast.iter_fields(node):
+                    if key == "body":
+                        continue
+                    if isinstance(value, ast.AST):
+                        value = ast.dump(value)
+                    elif isinstance(value, list):
+                        value = [ast.dump(item) for item in value]
+                    else:
+                        value = repr(value)
+                    fields.append((key, value))
+                docstring = None if isinstance(node, ast.Lambda) else ast.get_docstring(node, clean=False)
+                result.append((type(node).__name__, fields, docstring))
+            return result
+
+        if headers(before) != headers(after):
+            return None
+        try:
+            old = list(walk_codes(compile(before, "<blast-radius-analysis>", "exec", dont_inherit=True)))
+            new = list(walk_codes(compile(after, "<blast-radius-analysis>", "exec", dont_inherit=True)))
+            shape = lambda code: (code.co_qualname, code.co_flags, code.co_varnames, code.co_freevars, code.co_cellvars)
+            if [shape(code) for code in old] != [shape(code) for code in new]:
+                return None
+            selected = 0
+            for a, b in zip(old, new):
+                name = a.co_qualname.replace(".<locals>.", ".")
+                if not any(name == item or name.startswith(item + ".") for item in changed):
+                    continue
+                if fingerprint(a) == fingerprint(b):
+                    continue
+                if not a.co_flags & 2:
+                    return None
+                record = profile["codes"].get(path + ":" + code_key(a))
+                if not record or record["ambiguous"] or record["fingerprint"] != fingerprint(a):
+                    return None
+                if profile.get("static_complete") and all(not entry[1] and not self.mask(entry[0]) for entry in record["blocks"].values()):
+                    continue
+                offsets = changed_offsets(a, b)
+                if offsets is None:
+                    return None
+                _, blocks = layout(a)
+                for offset in offsets:
+                    entry = record["blocks"].get(str(blocks[offset]))
+                    if entry is None or entry[1]:
+                        return None
+                    selected |= self.mask(entry[0])
+            # Tests not fully observed retain the ordinary selection.
+            return selected | (self.all & ~self.mask(profile["completed"]))
+        except (ValueError, TypeError, SyntaxError, KeyError, RecursionError):
+            return None
+
     def select_file(self, change, allow_equivalence=True):
         if not self.map or change.unsupported or not change.path:
             return self.all, "fallback"
@@ -500,9 +589,14 @@ class Selector:
                     # never execute this module, so ordinary coverage is too narrow.
                     return self.all, "import-time structural change"
         result = result or self.mask(info["coverage"]) or self.all
+        reason = "baseline dependencies"
+        refined = self.bytecode_tests(change.path, before, after)
+        if refined is not None:
+            result = (result & refined) | reads
+            reason = "pristine basic-block dependencies"
         if equivalent:
             return (result & ~equivalent) | reads, "baseline observations certify local equivalence"
-        return result, "baseline dependencies"
+        return result, reason
 
     def select(self, patch):
         changes = parse_patch(patch)
