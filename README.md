@@ -14,17 +14,19 @@ and pinned source.
 
 On the 30 downloaded sample commits, the original starter scores **1,210.470 s**
 with zero misses; the previous submission scored **105.688 s** on these samples.
-The current candidate adds interpreter basic-block coverage and returned-callback
-dependencies to the existing line, setting, and semantic profiles.
-It scores **101.627 s simulated** with zero sample misses. Under the competition's
-Docker restrictions it used **1.850 s Python CPU**, approximately **103.477 s total**.
+The current candidate adds required-argument validation inputs, complete native
+file-access evidence, and exact SQL fixture input views to the existing profiles.
+It scores **99.549 s simulated** with zero sample misses. Under the competition's
+Docker restrictions it used **1.811 s Python CPU**, approximately **101.360 s total**.
 This includes a small CPU measurement wrapper. The repository remains below the
 20 MB limit.
 
 The submitted commit `7f134833f89ae9ac4f70d1160f60a20ec0ae2ce6` scored **172.8 s**
 on the hidden practice batch: 171.379 s simulated, about 1.41 s CPU, and no misses.
-The current candidate has not yet been scored on that hidden batch. Its sample
-score cannot establish whether it beats the 130.1 s practice leader.
+The next submission, `aa4f0c1a62234042b4c4640bf80d51105926c107`, scored **173.3 s**:
+the same 171.379 s simulated, with approximately 1.95 s CPU and no misses.
+The current candidate has not been scored on that hidden batch. Its sample score
+cannot establish whether it beats the 130.1 s practice leader.
 
 The clean Linux baseline passed 1,620 tests and 25,440 subtests, with one expected
 SQLite skip and process-pool serialization included. Setting reads were measured
@@ -80,6 +82,26 @@ conservatively. Factory source spans are protected. Literal argument edits can
 then select only callback users, including entries within inherited dispatch
 dictionaries. Import-time callback consumers disable this pruning.
 
+Expression `arg_types` boolean values have one special derived consumer: the
+initializer constructs `required_args`, and the validator checks those keys.
+A separate pristine pass records invalid or unknown argument inputs per test,
+using actual dictionary identity to include inheritance. Only None and empty
+plain lists count as missing. List subclasses, modified metadata, raw dictionary
+consumers, import-time missing arguments, and multiple-error ordering retain
+dependencies. Dictionary copies/spreads disable this refinement for their source.
+The initializer and validator are fingerprinted, their direct derived-set uses
+are checked against pinned source, and their source spans are protected.
+
+A native filesystem trace includes children and C-level file operations, with
+independent Python-open records and source hashes. Existing files with no content
+or sensitive metadata consumers can skip content edits; existence and file-type
+checks are allowed only when their counts match native pathname checks exactly.
+Mode, add/delete, and rename changes retain fallback. SQL fixture pruning requires
+the exact original helper and filter, matching native/Python open counts, and
+identical filtered input. Only empty lines and lines beginning with `--` disappear;
+metadata, inline comments, and SQL content remain significant. Diff hunk contents
+that resemble file headers are now parsed correctly.
+
 The entire AST edit must be covered by these checks, and the commit must change
 one file. Missing profiles, oversized or nonprimitive inputs, overloaded methods,
 uncertain identity/interning, changed operand computations, and unrelated edits
@@ -91,7 +113,7 @@ values and reads are recorded; the incoming patch is interpreted only at runtime
 No patch-to-answer or edit-kind-to-failure table is stored. Evidence is empirical
 and depends on the test environment. The map is collected from the pinned source;
 an independent baseline pass verifies dictionary/file reads without predicate
-instrumentation. All **85 focused regression tests** pass in the pinned Linux image,
+instrumentation. All **103 focused regression tests** pass in the pinned Linux image,
 including 64,800 interval cases checked against direct enumeration.
 Three fresh boundary mutations were also checked against real time-format tests;
 the selector retained all failures found in that bounded validation.
@@ -108,6 +130,12 @@ Linux suite: the parser change selected all 4 failures from a former selection
 of 1,334 tests; the generator change retained all 3 failures; a used callback
 retained both failures; the optimizer and unused-callback changes had no failures.
 No validation results or mutant outputs are consumed by the selector.
+Five further fresh edits validate the file/validator layer against the complete
+Linux suite: the unused entrypoint, filtered fixture comment, and Column flag
+produced no failures and selected no tests. Making Table's `this` argument required
+selected 22 tests and retained all 20 failures, down from 929 selected tests.
+Making Order's `expressions` argument optional selected its one actual failing
+test, down from 174 selected tests. All five checks had zero missed failures.
 
 The default Docker entrypoint has been tested as nobody, without a network, with
 a read-only filesystem, 64 MB temporary directory, 2 CPUs, and the scorer's memory
@@ -184,6 +212,19 @@ python tools/apply_block_map.py maps/dependencies.json .work/blocks.json
 python tools/complete_static_codes.py maps/dependencies.json .work/sqlglot
 python tools/collect_map.py .work/sqlglot --factories-only --output .work/factories.json
 python tools/apply_factory_map.py maps/dependencies.json .work/factories.json
+python tools/collect_map.py .work/sqlglot --requirements-only --output .work/requirements.json
+python tools/apply_requirement_map.py maps/dependencies.json .work/requirements.json
+```
+
+Native filesystem evidence is collected separately, with no tracer in the
+submission image. Using a shell with Docker bind-mount support, create `.work/linux`
+and run:
+
+```sh
+docker build -f Dockerfile.maps --target environment -t blast-radius-map-environment .
+docker build -f Dockerfile.files -t blast-radius-file-environment .
+docker run --rm --network none -v "$PWD:/project:ro" -v "$PWD/.work/linux:/results" blast-radius-file-environment python /project/tools/profile_filesystem.py /opt/sqlglot /results/filesystem
+python tools/apply_filesystem_map.py maps/dependencies.json .work/linux/filesystem
 ```
 
 The collection plugin executes process-pool jobs synchronously with input/output

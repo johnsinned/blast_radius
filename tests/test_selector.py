@@ -124,6 +124,13 @@ class PatchTests(unittest.TestCase):
         change, = parse_patch(text)
         self.assertEqual(apply_change("x=1", change), "x=2")
 
+    def test_hunk_content_that_resembles_file_headers_is_not_reparsed(self):
+        before = "-- comment\nSELECT 1;\n"
+        after = "++ changed\nSELECT 1;\n"
+        change, = parse_patch(patch_for(before, after, "fixture.sql"))
+        self.assertEqual(change.path, "fixture.sql")
+        self.assertEqual(apply_change(before, change), after)
+
 
 class WorkerTests(unittest.TestCase):
     def test_empty_and_short_suites(self):

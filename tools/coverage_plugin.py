@@ -17,6 +17,7 @@ import attribute_profile
 import integer_profile
 from block_coverage import BlockCoverage
 from factory_coverage import FactoryCoverage
+from requirement_coverage import RequirementCoverage
 
 ROOT = Path(os.environ["BLAST_SOURCE"]).resolve()
 OUT = Path(os.environ["BLAST_RAW_MAP"]).resolve()
@@ -99,6 +100,8 @@ if os.environ.get("BLAST_BLOCKS_ONLY") == "1":
     COV = BlockCoverage(ROOT, lambda: CURRENT)
 if os.environ.get("BLAST_FACTORIES_ONLY") == "1":
     COV = FactoryCoverage(ROOT, lambda: CURRENT)
+if os.environ.get("BLAST_REQUIREMENTS_ONLY") == "1":
+    COV = RequirementCoverage(ROOT, lambda: CURRENT)
 
 
 def relative(path):
@@ -149,7 +152,7 @@ def pytest_sessionstart(session):
 
 def pytest_collection_modifyitems(items):
     TESTS.extend(item.nodeid for item in items)
-    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY", "BLAST_BLOCKS_ONLY", "BLAST_FACTORIES_ONLY")):
+    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY", "BLAST_RANGES_ONLY", "BLAST_BLOCKS_ONLY", "BLAST_FACTORIES_ONLY", "BLAST_REQUIREMENTS_ONLY")):
         return
     seen = set()
     for name, module in list(sys.modules.items()):
@@ -207,4 +210,4 @@ def pytest_sessionfinish(session, exitstatus):
         name = relative(filename)
         if name:
             lines[name] = {str(n): cs for n, cs in data.contexts_by_lineno(filename).items() if any(cs)}
-    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "bytecode_profile": COV.export() if isinstance(COV, BlockCoverage) else {}, "factory_profile": COV.export() if isinstance(COV, FactoryCoverage) else {}, "attribute_imports_tracked": True, "attribute_profile": attribute_profile.export(), "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export(), "global_functions_tracked": hasattr(COV, "global_functions"), "global_functions": sorted(getattr(COV, "global_functions", []))}, separators=(",", ":")), encoding="utf-8")
+    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "bytecode_profile": COV.export() if isinstance(COV, BlockCoverage) else {}, "factory_profile": COV.export() if isinstance(COV, FactoryCoverage) else {}, "requirement_profile": COV.export() if isinstance(COV, RequirementCoverage) else {}, "attribute_imports_tracked": True, "attribute_profile": attribute_profile.export(), "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export(), "global_functions_tracked": hasattr(COV, "global_functions"), "global_functions": sorted(getattr(COV, "global_functions", []))}, separators=(",", ":")), encoding="utf-8")

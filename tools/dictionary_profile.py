@@ -3,6 +3,7 @@ import json
 
 CURRENT = lambda: ""
 SITES = {}
+READ_HOOK = None
 
 
 def key_id(key):
@@ -35,6 +36,8 @@ class ObservedDict(dict):
         site = getattr(self, "_blast_site", None)
         if not site:
             return
+        if READ_HOOK is not None:
+            READ_HOOK(site, key, whole)
         record = SITES.setdefault(site, {"whole": set(), "keys": {}, "global_whole": False, "global_keys": set()})
         context = CURRENT()
         token = None if whole else key_id(key)

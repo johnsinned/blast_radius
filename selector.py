@@ -43,12 +43,12 @@ def parse_patch(text: str) -> list[Change]:
             hunk = None
         elif change is None:
             continue
-        elif line.startswith("--- "):
+        elif hunk is None and line.startswith("--- "):
             raw = line[4:].rstrip("\r\n")
             change.added = raw == "/dev/null"
             if raw.startswith("a/"):
                 change.path = raw[2:]
-        elif line.startswith("+++ "):
+        elif hunk is None and line.startswith("+++ "):
             raw = line[4:].rstrip("\r\n")
             change.deleted = raw == "/dev/null"
             if raw.startswith("b/"):
@@ -77,7 +77,7 @@ def parse_patch(text: str) -> list[Change]:
             else:
                 edit_start = None
                 old_line += 1
-        elif line.startswith(("Binary files", "GIT binary patch", "rename from", "rename to")):
+        elif line.startswith(("Binary files", "GIT binary patch", "rename from", "rename to", "old mode ", "new mode ")):
             change.unsupported = True
     return changes
 
@@ -380,8 +380,18 @@ class Selector:
                     return 0
                 safe &= self.mask(self.map.get("attribute_profiled_tests")) & ~self.mask(profile["reads"])
                 continue
-            safe &= profiled
             if kind == "dictionary":
+                requirements = self.map.get("requirements", {})
+                requirement = requirements.get("sites", {}).get(site)
+                edits = [(key, a, b) for key, a, b in zip(comparison.keys, comparison.values, replacement.values) if ast.dump(a) != ast.dump(b)]
+                if requirement and all(isinstance(key, ast.Constant) and type(key.value) is str and key.value in requirement["keys"] and isinstance(a, ast.Constant) and type(a.value) is bool and isinstance(b, ast.Constant) and type(b.value) is bool for key, a, b in edits) and proof_unchanged(requirements["proof"]):
+                    if requirement["global"] or any(key.value in requirement["global_keys"] for key, _, _ in edits):
+                        return 0
+                    safe &= self.mask(self.map.get("requirement_profiled_tests")) & ~self.mask(requirements["unknown"]) & ~self.mask(requirement["raw"])
+                    for key, _, _ in edits:
+                        safe &= ~self.mask(requirement["keys"][key.value])
+                    continue
+                safe &= profiled
                 profile = self.map.get("dictionaries", {}).get(site)
                 if not profile or profile["global_whole"]:
                     return 0
@@ -393,6 +403,7 @@ class Selector:
                     affected |= self.mask(profile["keys"].get(key))
                 safe &= ~affected
                 continue
+            safe &= profiled
             profile = self.map.get("comparisons", {}).get(site)
             if profile and profile["global"]:
                 return 0
@@ -540,10 +551,29 @@ class Selector:
         info = self.map["files"].get(change.path)
         if change.added or change.deleted or not change.hunks:
             return self.all, "structural change"
+        inventory = self.map.get("file_inventory", {}).get(change.path)
+        if inventory and (not inventory["accessed"] or inventory.get("mode_only")):
+            try:
+                filename = self.source.joinpath(*PurePosixPath(change.path).parts)
+                if hashlib.sha256(filename.read_bytes()).hexdigest() == inventory["sha256"]:
+                    return 0, "no pristine content or sensitive-metadata consumer"
+            except OSError:
+                pass
         if not info:
             return self.all, "unmapped file"
         reads = self.mask(info.get("reads"))
         if not change.path.endswith(".py"):
+            if allow_equivalence and self.map.get("fixture_views", {}).get(change.path) == "sql_comment_lines":
+                try:
+                    source = self.read_source(change.path)
+                    filename = self.source.joinpath(*PurePosixPath(change.path).parts)
+                    if inventory and hashlib.sha256(filename.read_bytes()).hexdigest() == inventory["sha256"]:
+                        patched = apply_change(source, change)
+                        view = lambda text: "\n".join(line for line in text.splitlines() if line and not line.startswith("--"))
+                        if view(source) == view(patched):
+                            return 0, "unchanged verified SQL fixture input view"
+                except (OSError, ValueError, UnicodeError):
+                    pass
             return reads or self.all, "file readers"
         try:
             source = self.read_source(change.path)

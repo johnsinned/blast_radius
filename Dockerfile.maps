@@ -26,6 +26,8 @@ RUN python tools/apply_block_map.py /export/dependencies.json /app/blocks.json
 RUN python tools/complete_static_codes.py /export/dependencies.json /opt/sqlglot
 RUN python tools/collect_map.py /opt/sqlglot --archive --factories-only --output /app/factories.json --timeout 1800
 RUN python tools/apply_factory_map.py /export/dependencies.json /app/factories.json
+RUN python tools/collect_map.py /opt/sqlglot --archive --requirements-only --output /app/requirements.json --timeout 1800
+RUN python tools/apply_requirement_map.py /export/dependencies.json /app/requirements.json
 
 FROM scratch AS export
 COPY --from=collect /export/ /
