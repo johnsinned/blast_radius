@@ -12,6 +12,8 @@ import coverage
 import pytest
 import comparison_profile
 import dictionary_profile
+import attribute_loader
+import attribute_profile
 
 ROOT = Path(os.environ["BLAST_SOURCE"]).resolve()
 OUT = Path(os.environ["BLAST_RAW_MAP"]).resolve()
@@ -38,6 +40,7 @@ class MonitoringCoverage:
         self.lines = {}
         self.paths = {}
         self.tool = 5
+        self.global_functions = set()
 
     def record(self, code, lineno):
         filename = code.co_filename
@@ -57,7 +60,11 @@ class MonitoringCoverage:
         sys.monitoring.set_events(self.tool, sys.monitoring.events.LINE | sys.monitoring.events.PY_START)
 
     def start_code(self, code, offset):
-        return self.record(code, code.co_firstlineno)
+        result = self.record(code, code.co_firstlineno)
+        path = self.paths.get(code.co_filename)
+        if path and not self.context and code.co_flags & 2:
+            self.global_functions.add(path + "::" + code.co_qualname.replace(".<locals>.", "."))
+        return result
 
     def switch_context(self, context):
         self.context = context
@@ -83,7 +90,7 @@ class MonitoringCoverage:
 
 
 COV = MonitoringCoverage() if hasattr(sys, "monitoring") and os.environ.get("BLAST_TRACER") != "coverage" else coverage.Coverage(data_file=str(OUT.with_suffix(".coverage")), source=[str(ROOT / "sqlglot"), str(ROOT / "tests")], config_file=False)
-if os.environ.get("BLAST_READS_ONLY") == "1":
+if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY")):
     COV = ReadOnlyCoverage()
 
 
@@ -100,7 +107,7 @@ def audit(event, args):
     if event != "open" or not CURRENT:
         return
     name = relative(args[0])
-    if name and not name.endswith((".pyc", ".pyo")):
+    if name and "/__pycache__/" not in name and not name.endswith((".pyc", ".pyo")):
         if name.endswith(".py") and comparison_profile.is_import_read():
             return
         FILES.setdefault(name, set()).add(CURRENT)
@@ -124,7 +131,10 @@ CONSTRUCTED = set()
 
 
 def pytest_sessionstart(session):
-    comparison_profile.install(ROOT, lambda: CURRENT)
+    if os.environ.get("BLAST_ATTRIBUTES_ONLY") == "1":
+        attribute_loader.install(ROOT, lambda: CURRENT)
+    elif os.environ.get("BLAST_COVERAGE_ONLY") != "1":
+        comparison_profile.install(ROOT, lambda: CURRENT)
     concurrent.futures.ProcessPoolExecutor = TracedExecutor
     COV.start()
     sys.addaudithook(audit)
@@ -132,7 +142,7 @@ def pytest_sessionstart(session):
 
 def pytest_collection_modifyitems(items):
     TESTS.extend(item.nodeid for item in items)
-    if os.environ.get("BLAST_READS_ONLY") == "1":
+    if any(os.environ.get(name) == "1" for name in ("BLAST_READS_ONLY", "BLAST_ATTRIBUTES_ONLY", "BLAST_TYPES_ONLY")):
         return
     seen = set()
     for name, module in list(sys.modules.items()):
@@ -190,4 +200,4 @@ def pytest_sessionfinish(session, exitstatus):
         name = relative(filename)
         if name:
             lines[name] = {str(n): cs for n, cs in data.contexts_by_lineno(filename).items() if any(cs)}
-    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export()}, separators=(",", ":")), encoding="utf-8")
+    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "attribute_imports_tracked": True, "attribute_profile": attribute_profile.export(), "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export(), "global_functions_tracked": hasattr(COV, "global_functions"), "global_functions": sorted(getattr(COV, "global_functions", []))}, separators=(",", ":")), encoding="utf-8")

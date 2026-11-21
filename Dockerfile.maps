@@ -1,17 +1,20 @@
 # Optional reproducible map regeneration in the scorer's Linux/Python image.
-FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS collect
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS environment
 WORKDIR /app
 COPY requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir -r requirements.lock coverage==7.13.4
 COPY tools /app/tools
 COPY semantic_values.py /app/semantic_values.py
 RUN python tools/fetch_source.py /opt/sqlglot
+FROM environment AS collect
 # fetch_source uses a source archive, so create no git dependency: verify
 # provenance against the pinned archive through the explicit archive mode.
 RUN python tools/collect_map.py /opt/sqlglot --archive --output /app/raw.json --timeout 1800
 RUN python tools/compile_map.py /opt/sqlglot /app/raw.json --archive --output /export/dependencies.json
 RUN python tools/collect_map.py /opt/sqlglot --archive --reads-only --output /app/reads.json --timeout 1800
 RUN python tools/apply_read_map.py /export/dependencies.json /app/reads.json
+RUN python tools/collect_map.py /opt/sqlglot --archive --attributes-only --output /app/attributes.json --timeout 1800
+RUN python tools/apply_attribute_map.py /export/dependencies.json /app/attributes.json
 
 FROM scratch AS export
 COPY --from=collect /export/ /

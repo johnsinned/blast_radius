@@ -8,9 +8,10 @@ import sys
 import os
 from semantic_values import OPERATIONS, snapshot, BUILTIN_NONE_EQUALITY_TYPES
 try:
-    from . import dictionary_profile
+    from . import dictionary_profile, method_profile
 except ImportError:
     import dictionary_profile
+    import method_profile
 
 CURRENT = lambda: ""
 SITES = {}
@@ -32,6 +33,7 @@ def describe(value):
         name = type.__getattribute__(cls, "__module__") + ":" + type.__getattribute__(cls, "__qualname__")
         kind = "unsupported"
         canonical = None
+        proof, guards = {}, []
         if cls is type(None) or (eq is object.__eq__ and ne is object.__ne__):
             kind = "identity"
         elif any(cls is builtin for builtin in BUILTIN_NONE_EQUALITY_TYPES):
@@ -42,16 +44,21 @@ def describe(value):
             if len({str.__str__(v) for v in members}) == len(members):
                 kind = "canonical_str_enum"
                 canonical = {id(v) for v in members}
-        description = {"name": name, "kind": kind}
+        if kind == "unsupported":
+            evidence = method_profile.prove(cls, eq, ne)
+            if evidence:
+                proof, guards = evidence
+                kind = "custom_none"
+        description = {"name": name, "kind": kind, **proof}
         # Different definitions during tests are kept as distinct type states.
         signature = str(len(TYPE_CACHE)) + ":" + name + ":" + kind
         TYPES[signature] = description
-        checks = [(d, d.get("__eq__"), d.get("__ne__")) for d in dictionaries]
+        checks = [(d, d.get("__eq__"), d.get("__ne__"), d.get("__getattribute__")) for d in dictionaries]
         if cls is type(None) or cls is object or kind in ("unsupported", "builtin_value"):
             checks = []
-        TYPE_CACHE[key] = signature, canonical, mro, checks
-    signature, canonical, mro, checks = TYPE_CACHE[key]
-    if checks and (type.__getattribute__(cls, "__mro__") is not mro or any(d.get("__eq__") is not eq or d.get("__ne__") is not ne for d, eq, ne in checks)):
+        TYPE_CACHE[key] = signature, canonical, mro, checks, guards
+    signature, canonical, mro, checks, guards = TYPE_CACHE[key]
+    if checks and (type.__getattribute__(cls, "__mro__") is not mro or any(d.get("__eq__") is not eq or d.get("__ne__") is not ne or d.get("__getattribute__") is not getattribute for d, eq, ne, getattribute in checks)) or any((namespace.get(name, expected) if isinstance(namespace, dict) else getattr(namespace, name)) is not expected for namespace, name, expected in guards):
         signature += ":modified"
         TYPES[signature] = {"name": TYPES[signature.removesuffix(":modified")]["name"], "kind": "unsupported"}
         return signature
@@ -67,7 +74,7 @@ def probe(site, operation, left, right):
     if context:
         pair = (describe(left), describe(right))
         record["pairs"].setdefault(pair, set()).add(context)
-        if context not in record["unknown"]:
+        if os.environ.get("BLAST_TYPES_ONLY") != "1" and context not in record["unknown"]:
             try:
                 values = (snapshot(left), snapshot(right), left is right)
                 if values not in record["values"] and len(record["values"]) >= 32:
@@ -96,7 +103,7 @@ class Instrument(ast.NodeTransformer):
 
     def visit_Dict(self, node):
         self.generic_visit(node)
-        if self.function_depth:
+        if self.function_depth or os.environ.get("BLAST_TYPES_ONLY") == "1":
             return node
         site = f"{self.relative}:{node.lineno}:{node.col_offset}"
         return ast.copy_location(ast.Call(func=ast.Name(id=DICT_HELPER, ctx=ast.Load()), args=[ast.Constant(site), node], keywords=[]), node)
@@ -106,6 +113,8 @@ class Instrument(ast.NodeTransformer):
         if os.environ.get("BLAST_READS_ONLY") == "1":
             return node
         if len(node.ops) != 1:
+            return node
+        if os.environ.get("BLAST_TYPES_ONLY") == "1" and not (isinstance(node.ops[0], (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)) and any(isinstance(value, ast.Constant) and value.value is None for value in (node.left, node.comparators[0]))):
             return node
         site = f"{self.relative}:{node.lineno}:{node.col_offset}"
         operation = type(node.ops[0]).__name__
@@ -128,11 +137,16 @@ class Loader(importlib.abc.Loader):
     def exec_module(self, module):
         source = self.get_source(module.__name__)
         relative = Path(self.filename).resolve().relative_to(self.root).as_posix()
+        original = ast.parse(source, filename=self.filename)
+        # Keep the original AST separate: the loader's wrappers preserve its
+        # operation semantics but change the compiled instruction sequence.
         tree = Instrument(relative).visit(ast.parse(source, filename=self.filename))
         ast.fix_missing_locations(tree)
         module.__dict__[HELPER] = probe
         module.__dict__[DICT_HELPER] = dictionary_profile.observe
-        exec(compile(tree, self.filename, "exec", dont_inherit=True), module.__dict__)
+        code = compile(tree, self.filename, "exec", dont_inherit=True)
+        method_profile.register(original, code, relative, module.__dict__)
+        exec(code, module.__dict__)
 
 
 class Finder(importlib.abc.MetaPathFinder):

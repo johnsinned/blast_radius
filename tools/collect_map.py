@@ -14,6 +14,9 @@ def main():
     parser.add_argument("--pytest-args", nargs=argparse.REMAINDER, default=[])
     parser.add_argument("--archive", action="store_true", help="source was downloaded by fetch_source.py")
     parser.add_argument("--reads-only", action="store_true", help="refresh dictionary/file reads without coverage or scalar fixtures")
+    parser.add_argument("--coverage-only", action="store_true", help="measure unmodified-source coverage without operand/dictionary probes")
+    parser.add_argument("--attributes-only", action="store_true", help="measure literal class-setting reads independently")
+    parser.add_argument("--types-only", action="store_true", help="refresh operand types without snapshots or coverage")
     args = parser.parse_args()
     source, output = args.source.resolve(), args.output.resolve()
     if args.archive:
@@ -27,6 +30,9 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, BLAST_SOURCE=str(source), BLAST_RAW_MAP=str(output), SKIP_INTEGRATION="0", PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONPATH=os.pathsep.join([str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent.parent), str(source)]), OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1")
     env["BLAST_READS_ONLY"] = "1" if args.reads_only else "0"
+    env["BLAST_COVERAGE_ONLY"] = "1" if args.coverage_only else "0"
+    env["BLAST_ATTRIBUTES_ONLY"] = "1" if args.attributes_only else "0"
+    env["BLAST_TYPES_ONLY"] = "1" if args.types_only else "0"
     with output.with_suffix(".log").open("w", encoding="utf-8") as log:
         run = subprocess.run([sys.executable, "-m", "pytest", "-p", "coverage_plugin", "-v", "--tb=short", "tests", *args.pytest_args], cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)
     print(f"pytest exit={run.returncode}; map={output}; log={output.with_suffix('.log')}")

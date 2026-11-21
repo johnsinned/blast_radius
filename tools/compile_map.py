@@ -14,6 +14,7 @@ from map_format import compact_masks
 def compile_map(root, raw, output, archive=False):
     tests = raw["tests"]
     numbers = {name: i for i, name in enumerate(tests)}
+    global_functions = set(raw.get("global_functions", []))
 
     def bits(contexts):
         result = 0
@@ -52,6 +53,8 @@ def compile_map(root, raw, output, archive=False):
 
     files = {}
     for rel in sorted(set(trees) | set(raw["files"]) | set(line_maps)):
+        if "/__pycache__/" in rel:
+            continue
         lm = line_maps.get(rel, {})
 
         def covered(start, end):
@@ -75,7 +78,8 @@ def compile_map(root, raw, output, archive=False):
             if is_class or (is_func and not isinstance(node, ast.Lambda)):
                 new_scope = (*scope, node.name)
                 start = min([node.lineno] + [d.lineno for d in node.decorator_list])
-                info["scopes"].append({"start": start, "end": node.end_lineno, "kind": "class" if is_class else "function", "name": ".".join(new_scope), "coverage": intern(covered(start, node.end_lineno))})
+                scope_name = ".".join(new_scope)
+                info["scopes"].append({"start": start, "end": node.end_lineno, "kind": "class" if is_class else "function", "decorated": bool(node.decorator_list), "name": scope_name, "coverage": intern(covered(start, node.end_lineno)), "global_call": rel + "::" + scope_name in global_functions})
             if isinstance(node, ast.stmt):
                 header = node.lineno
                 if isinstance(node, (ast.If, ast.While, ast.Assert)):
@@ -105,6 +109,7 @@ def compile_map(root, raw, output, archive=False):
         raise SystemExit("incomplete pytest collection; fix collection errors before compiling")
     reports = {name: sorted({r["outcome"] for r in reports}) for name, reports in raw["reports"].items()}
     result = {"version": 1, "pin": pin, "provenance": {"python": platform.python_version(), "platform": platform.system(), "method": "pristine pytest line coverage, file reads, constructor receivers, static AST dependencies; process-pool jobs executed synchronously with input/output pickle round trips", "test_count": len(tests), "baseline_reports": reports}, "tests": tests, "sets": sets, "files": files}
+    result["global_functions_tracked"] = raw.get("global_functions_tracked", False)
     add_comparisons(result, raw)
     compact_masks(result)
     output.parent.mkdir(parents=True, exist_ok=True)

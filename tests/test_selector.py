@@ -11,6 +11,7 @@ from score import score_run
 from tools.baseline_executor import TracedExecutor
 from tools import comparison_profile
 from selector import identity_only_changes
+from selector import changed_function_bodies, code_layout
 import ast
 import enum
 
@@ -206,6 +207,75 @@ class DependencyTests(DependencyFixture, unittest.TestCase):
             self.selector().read_source("../secret")
 
 
+class BodyExecutionTests(DependencyFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.map["global_functions_tracked"] = True
+        self.map["files"]["sqlglot/demo.py"]["lines"].pop("2")
+        self.map["files"]["sqlglot/demo.py"]["scopes"][0].update(name="f", coverage=0, global_call=False)
+        self.map["files"]["sqlglot/demo.py"]["scopes"][1].update(name="g", global_call=False)
+
+    def test_uncalled_body_does_not_fall_back_to_whole_file(self):
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace("return 1", "return 42")))
+        self.assertEqual(selected, [])
+
+    def test_source_readers_remain_selected(self):
+        self.map["files"]["sqlglot/demo.py"]["reads"] = 2
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace("return 1", "return 42")))
+        self.assertEqual([t["number"] for t in selected], [17])
+
+    def test_import_time_calls_prevent_pruning(self):
+        self.map["files"]["sqlglot/demo.py"]["scopes"][0]["global_call"] = True
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace("return 1", "return 42")))
+        self.assertEqual(selected, self.tests)
+
+    def test_generator_flag_change_prevents_pruning(self):
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace("return 1", "yield 1")))
+        self.assertEqual(selected, self.tests)
+
+    def test_docstrings_and_signatures_are_not_body_only(self):
+        before = ast.parse("def f():\n    'old'\n    return 1\n")
+        self.assertIsNone(changed_function_bodies(before, ast.parse("def f():\n    'new'\n    return 1\n")))
+        self.assertIsNone(changed_function_bodies(before, ast.parse("def f(x):\n    'old'\n    return 1\n")))
+
+    def test_nested_body_changes_name_the_inner_function(self):
+        before = ast.parse("def outer():\n def inner():\n  return 1\n return inner\n")
+        after = ast.parse("def outer():\n def inner():\n  return 2\n return inner\n")
+        self.assertEqual(changed_function_bodies(before, after), ["outer.inner"])
+        self.assertEqual(code_layout(before), code_layout(after))
+
+
+class AttributeSelectionTests(DependencyFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.source = "class Example:\n    FLAG = False\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        self.map["files"]["sqlglot/demo.py"]["assignments"] = [{"start": 2, "end": 2, "users": 3}]
+        self.map["files"]["sqlglot/demo.py"]["scopes"] = [{"start": 1, "end": 2, "kind": "class", "coverage": 0}]
+        self.map["attribute_profiled_tests"] = 3
+        self.profile = {"eligible": True, "global": False, "reads": 1}
+        self.map["attributes"] = {"sqlglot/demo.py:2:4": self.profile}
+
+    def select_edit(self):
+        return self.selector().select(patch_for(self.source, self.source.replace("False", "True")))[0]
+
+    def test_only_observed_readers_are_selected(self):
+        self.assertEqual([t["number"] for t in self.select_edit()], [99])
+
+    def test_global_consumption_or_unknown_metaclass_prevents_pruning(self):
+        self.profile["global"] = True
+        self.assertEqual(self.select_edit(), self.tests)
+        self.profile.update({"global": False, "eligible": False})
+        self.assertEqual(self.select_edit(), self.tests)
+
+    def test_unprofiled_tests_and_source_readers_remain_selected(self):
+        self.map["attribute_profiled_tests"] = 1
+        self.assertEqual(self.select_edit(), self.tests)
+        self.map["attribute_profiled_tests"] = 3
+        self.map["files"]["sqlglot/demo.py"]["reads"] = 2
+        self.assertEqual(self.select_edit(), self.tests)
+
+
 class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -277,6 +347,13 @@ class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
         self.map["comparisons"]["sqlglot/demo.py:2:11"]["global"] = True
         selected, _ = self.selector().select(self.edit())
         self.assertEqual([t["number"] for t in selected], [99])
+
+    def test_original_custom_equality_proof_is_limited_to_none(self):
+        self.map["comparison_types"].update({"custom": {"kind": "custom_none", "none_eq": True, "none_ne": False, "proof_files": ["sqlglot/original.py"]}, "none": {"name": "builtins:NoneType", "kind": "identity"}})
+        self.map["comparisons"]["sqlglot/demo.py:2:11"]["pairs"] = [["custom", "none", 1]]
+        self.assertEqual(self.selector().select(self.edit())[0], [])
+        self.map["comparison_types"]["custom"]["proof_files"].append("sqlglot/demo.py")
+        self.assertEqual([t["number"] for t in self.selector().select(self.edit())[0]], [99])
 
     def test_value_identity_does_not_assume_stable_interning(self):
         self.source = "def f(x, y):\n    return x == y\n\ndef g():\n    return 2\n"

@@ -12,21 +12,24 @@ or map builder. Sample answers are read only by development scoring tools.
 The submitted image has only the selector, the baseline map, and pinned source.
 
 On the 30 downloaded sample commits, the original starter scores **1,210.470 s**
-with zero misses; this selector scores **106.308 s** with zero misses. The earlier
-submitted revision scored 122.847 s on these samples. Under the competition's
-Docker restrictions, the candidate used about **0.995 s Python CPU**, for an
-approximately **107.303 s sample total**. The CPU measurement includes a small
-measurement wrapper. The repository files total about 9.5 MB, below the 20 MB limit.
+with zero misses; the previous submission scored **106.308 s** on these samples.
+The current candidate adds independently measured class-setting reads, guarded
+unused-function handling, and source-checked equality behavior against None.
+It scores **105.688 s simulated** with zero sample misses. Under the competition's
+Docker restrictions it used **1.339 s Python CPU**, approximately **107.027 s total**.
+This includes a small CPU measurement wrapper. The repository remains below the
+20 MB limit.
 
-The submitted commit `7230010449e0c07d898e5ff7ab4d4cabd9cef4a4` scored **204.3 s**
-on the hidden practice batch: 203.311 s simulated, about 1.03 s CPU, and no misses.
+The submitted commit `1ed5c95ffcb82cd49e8cd903c4328f75ce299b3b` scored **198.0 s**
+on the hidden practice batch: 196.844 s simulated, about 1.13 s CPU, and no misses.
 The current candidate has not yet been scored on that hidden batch. Its sample
 score cannot establish whether it beats the 136.1 s practice leader.
 
-All 1,621 tests and 25,454 subtests in the instrumented pristine local baseline
-passed, with process-pool serialization included. The challenge's test manifest
-contains 1,620 numbered tests; matching
-uses pytest IDs, so the environment's additional test is not emitted.
+The clean Linux baseline passed 1,620 tests and 25,440 subtests, with one expected
+SQLite skip and process-pool serialization included. Setting reads were measured
+in a separate passing Linux run. Matching uses pytest IDs rather than collection
+order. Bounded primitive fixtures retained from the earlier Windows baseline are
+identified separately in the map provenance.
 
 The map records operand types and bounded primitive input fixtures at comparison
 sites, plus reads of individual keys in static configuration dictionaries. At
@@ -35,6 +38,15 @@ inputs. A value-only dictionary edit selects readers of the changed entries and
 any whole-dictionary consumers. Changes to keys or nonliteral initializers keep
 the ordinary dependency selection. Import-time value dependencies disable this
 pruning. Genuine source inspection is retained; importer source reads are excluded.
+
+Literal class-setting edits additionally use actual inherited attribute reads,
+dynamic getattr/vars accesses, class namespace consumers, and direct name reads.
+Unrecognized metaclass namespace handling or import-time reads disable this
+pruning. Function-body edits can avoid file-wide fallback when the function was
+never called; signatures, docstrings, code flags, local/closure layouts, and
+import-time calls are checked first. Custom equality is used only where the
+original loaded method has a conservative short-circuit proof against None,
+with live method/global guards and a patch dependency on the proof's source file.
 
 The entire AST edit must be covered by these checks, and the commit must change
 one file. Missing profiles, oversized or nonprimitive inputs, overloaded methods,
@@ -47,14 +59,18 @@ values and reads are recorded; the incoming patch is interpreted only at runtime
 No patch-to-answer or edit-kind-to-failure table is stored. Evidence is empirical
 and depends on the test environment. The map is collected from the pinned source;
 an independent baseline pass verifies dictionary/file reads without predicate
-instrumentation. All 48 focused regression tests pass in the pinned Linux image.
+instrumentation. All **69 focused regression tests** pass in the pinned Linux image.
 Three fresh boundary mutations were also checked against real time-format tests;
 the selector retained all failures found in that bounded validation.
+Five additional fresh mutations were checked against the complete Linux suite:
+three setting changes produced 9, 3, and 6 failing numbered tests respectively,
+all retained; a None-equality change and an unused public function-body change
+produced no failures. These development results are not embedded in the map.
 
 The default Docker entrypoint has been tested as nobody, without a network, with
 a read-only filesystem, 64 MB temporary directory, 2 CPUs, and the scorer's memory
-and process limits. The dependency observations were collected on Windows/Python
-3.13; Linux map regeneration is available below.
+and process limits. Ordinary coverage and the new setting/type observations use
+the pinned Linux/Python 3.13 environment; regeneration is available below.
 
 ## Run locally without Docker
 
@@ -111,6 +127,8 @@ python tools/collect_map.py .work/sqlglot
 python tools/compile_map.py .work/sqlglot .work/raw-map.json
 python tools/collect_map.py .work/sqlglot --reads-only --output .work/reads.json
 python tools/apply_read_map.py maps/dependencies.json .work/reads.json
+python tools/collect_map.py .work/sqlglot --attributes-only --output .work/attributes.json
+python tools/apply_attribute_map.py maps/dependencies.json .work/attributes.json
 ```
 
 The collection plugin executes process-pool jobs synchronously with input/output

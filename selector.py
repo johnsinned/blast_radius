@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 import tokenize
+import types
 from semantic_values import compare, restore, snapshot, dictionary_key_id
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
@@ -165,6 +166,17 @@ def semantic_changes(before, after):
         if isinstance(a, ast.AST):
             if type(a) is not type(b):
                 return False
+            if isinstance(a, (ast.Assign, ast.AnnAssign)) and a.value is not None and not isinstance(a.value, ast.Dict) and not equal(a, b):
+                target = a.target if isinstance(a, ast.AnnAssign) else a.targets[0] if len(a.targets) == 1 else None
+                if isinstance(target, ast.Name) and all(same(value, getattr(b, key)) for key, value in ast.iter_fields(a) if key != "value"):
+                    try:
+                        literal(a.value)
+                        literal(b.value)
+                    except (ValueError, TypeError, SyntaxError, RecursionError):
+                        pass
+                    else:
+                        changes.append(("attribute", a, b))
+                        return True
             if isinstance(a, ast.Compare) and len(a.ops) == len(b.ops) == 1 and not equal(a, b):
                 operands_same = equal(a.left, b.left) and equal(a.comparators[0], b.comparators[0])
                 if not operands_same and any(isinstance(op, (ast.Is, ast.IsNot)) for op in a.ops + b.ops):
@@ -199,6 +211,55 @@ def semantic_changes(before, after):
         return type(a) is type(b) and a == b
 
     return changes if same(before, after) and changes else None
+
+
+def changed_function_bodies(before, after):
+    """Match edits wholly within existing bodies, preserving their public metadata."""
+    changed = []
+
+    def equal(a, b):
+        return ast.dump(a, include_attributes=False) == ast.dump(b, include_attributes=False)
+
+    def same(a, b, scope=()):
+        if isinstance(a, ast.AST):
+            if type(a) is not type(b):
+                return False
+            if equal(a, b):
+                return True
+            if isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = (*scope, a.name)
+                if any(not same(value, getattr(b, key), scope) for key, value in ast.iter_fields(a) if key != "body"):
+                    return False
+                if ast.get_docstring(a, clean=False) != ast.get_docstring(b, clean=False):
+                    return False
+                saved = len(changed)
+                if same(a.body, b.body, name):
+                    return True
+                del changed[saved:]
+                changed.append(".".join(name))
+                return True
+            child_scope = (*scope, a.name) if isinstance(a, ast.ClassDef) else scope
+            return all(same(value, getattr(b, key), child_scope) for key, value in ast.iter_fields(a))
+        if isinstance(a, list):
+            return isinstance(b, list) and len(a) == len(b) and all(same(x, y, scope) for x, y in zip(a, b))
+        return type(a) is type(b) and a == b
+
+    return changed if same(before, after) and changed else None
+
+
+def code_layout(tree):
+    """Compilation only: check flags and closure/local layout without executing code."""
+    result = {}
+
+    def walk(code):
+        signature = (code.co_flags, code.co_freevars, code.co_cellvars, code.co_varnames)
+        result.setdefault(code.co_qualname, []).append(signature)
+        for value in code.co_consts:
+            if isinstance(value, types.CodeType):
+                walk(value)
+
+    walk(compile(tree, "<blast-radius-analysis>", "exec", dont_inherit=True))
+    return result
 
 
 class Selector:
@@ -245,13 +306,20 @@ class Selector:
 
     def equivalent_tests(self, path, before, after):
         changes = semantic_changes(before, after)
-        if not changes or "comparisons" not in self.map:
+        if not changes:
             return 0
         profiled = self.mask(self.map.get("comparison_profiled_tests"))
-        safe = profiled
-        types = self.map["comparison_types"]
+        safe = self.all
+        types = self.map.get("comparison_types", {})
         for kind, comparison, replacement in changes:
             site = f"{path}:{comparison.lineno}:{comparison.col_offset}"
+            if kind == "attribute":
+                profile = self.map.get("attributes", {}).get(site)
+                if not profile or not profile["eligible"] or profile["global"]:
+                    return 0
+                safe &= self.mask(self.map.get("attribute_profiled_tests")) & ~self.mask(profile["reads"])
+                continue
+            safe &= profiled
             if kind == "dictionary":
                 profile = self.map.get("dictionaries", {}).get(site)
                 if not profile or profile["global_whole"]:
@@ -264,7 +332,7 @@ class Selector:
                     affected |= self.mask(profile["keys"].get(key))
                 safe &= ~affected
                 continue
-            profile = self.map["comparisons"].get(site)
+            profile = self.map.get("comparisons", {}).get(site)
             if not profile or profile["global"] or not profile["pairs"]:
                 return 0
             operands_same = ast.dump(comparison.left) == ast.dump(replacement.left) and ast.dump(comparison.comparators[0]) == ast.dump(replacement.comparators[0])
@@ -280,6 +348,10 @@ class Selector:
                     equivalent = True
                 if types[right].get("name") == "builtins:NoneType" and a in ("identity", "builtin_value", "canonical_str_enum"):
                     equivalent = True
+                equality = op in ("Is", "Eq")
+                for none_type, custom in ((types[left], types[right]), (types[right], types[left])):
+                    if none_type.get("name") == "builtins:NoneType" and custom.get("kind") == "custom_none" and path not in custom.get("proof_files", []):
+                        equivalent = bool(custom.get("none_eq") if equality else custom.get("none_ne"))
                 if not equivalent:
                     type_safe &= ~self.mask(contexts)
             value_safe = 0
@@ -310,6 +382,25 @@ class Selector:
             safe &= type_safe | value_safe
         return safe
 
+    def body_callers(self, info, before, after):
+        if not self.map.get("global_functions_tracked"):
+            return None
+        changed = changed_function_bodies(before, after)
+        if not changed:
+            return None
+        scopes = {scope["name"]: scope for scope in info["scopes"] if scope["kind"] == "function"}
+        if any(name not in scopes or scopes[name].get("global_call") for name in changed):
+            return None
+        try:
+            if code_layout(before) != code_layout(after):
+                return None
+        except (SyntaxError, ValueError, RecursionError):
+            return None
+        callers = 0
+        for name in changed:
+            callers |= self.mask(scopes[name]["coverage"])
+        return callers
+
     def select_file(self, change, allow_equivalence=True):
         if not self.map or change.unsupported or not change.path:
             return self.all, "fallback"
@@ -338,6 +429,9 @@ class Selector:
         if ast.dump(before, include_attributes=False) == ast.dump(after, include_attributes=False):
             return reads, "same Python AST"
         equivalent = self.equivalent_tests(change.path, before, after) if allow_equivalence else 0
+        body_callers = self.body_callers(info, before, after)
+        if body_callers == 0:
+            return reads, "unchanged function metadata; bodies not executed"
 
         changed = change.old_lines | change.anchors
         result = reads | self.line_mask(info, changed)
