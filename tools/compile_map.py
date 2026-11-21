@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import subprocess
 from compile_comparisons import add_comparisons
+from map_format import compact_masks
 
 
 def compile_map(root, raw, output, archive=False):
@@ -105,6 +106,7 @@ def compile_map(root, raw, output, archive=False):
     reports = {name: sorted({r["outcome"] for r in reports}) for name, reports in raw["reports"].items()}
     result = {"version": 1, "pin": pin, "provenance": {"python": platform.python_version(), "platform": platform.system(), "method": "pristine pytest line coverage, file reads, constructor receivers, static AST dependencies; process-pool jobs executed synchronously with input/output pickle round trips", "test_count": len(tests), "baseline_reports": reports}, "tests": tests, "sets": sets, "files": files}
     add_comparisons(result, raw)
+    compact_masks(result)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, separators=(",", ":"), sort_keys=True), encoding="utf-8")
     print(f"{output}: {output.stat().st_size:,} bytes; {len(files)} files; {len(sets)} distinct test sets")

@@ -11,6 +11,7 @@ from baseline_executor import TracedExecutor
 import coverage
 import pytest
 import comparison_profile
+import dictionary_profile
 
 ROOT = Path(os.environ["BLAST_SOURCE"]).resolve()
 OUT = Path(os.environ["BLAST_RAW_MAP"]).resolve()
@@ -21,6 +22,15 @@ REPORTS = {}
 TESTS = []
 EXECUTED = set()
 CLASS_SETUP = {}
+class ReadOnlyCoverage:
+    def start(self): pass
+    def stop(self): pass
+    def save(self): pass
+    def switch_context(self, context): pass
+    def get_data(self): return self
+    def measured_files(self): return []
+
+
 class MonitoringCoverage:
     """Record each source line once per context using Python 3.12+ monitoring."""
     def __init__(self):
@@ -73,6 +83,8 @@ class MonitoringCoverage:
 
 
 COV = MonitoringCoverage() if hasattr(sys, "monitoring") and os.environ.get("BLAST_TRACER") != "coverage" else coverage.Coverage(data_file=str(OUT.with_suffix(".coverage")), source=[str(ROOT / "sqlglot"), str(ROOT / "tests")], config_file=False)
+if os.environ.get("BLAST_READS_ONLY") == "1":
+    COV = ReadOnlyCoverage()
 
 
 def relative(path):
@@ -89,6 +101,8 @@ def audit(event, args):
         return
     name = relative(args[0])
     if name and not name.endswith((".pyc", ".pyo")):
+        if name.endswith(".py") and comparison_profile.is_import_read():
+            return
         FILES.setdefault(name, set()).add(CURRENT)
 
 
@@ -118,6 +132,8 @@ def pytest_sessionstart(session):
 
 def pytest_collection_modifyitems(items):
     TESTS.extend(item.nodeid for item in items)
+    if os.environ.get("BLAST_READS_ONLY") == "1":
+        return
     seen = set()
     for name, module in list(sys.modules.items()):
         if not name.startswith("sqlglot") or module is None:
@@ -174,4 +190,4 @@ def pytest_sessionfinish(session, exitstatus):
         name = relative(filename)
         if name:
             lines[name] = {str(n): cs for n, cs in data.contexts_by_lineno(filename).items() if any(cs)}
-    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "comparison_profile": comparison_profile.export()}, separators=(",", ":")), encoding="utf-8")
+    OUT.write_text(json.dumps({"tests": TESTS, "executed": sorted(EXECUTED), "lines": lines, "files": {p: sorted(cs) for p, cs in FILES.items()}, "classes": {p: sorted(cs) for p, cs in CLASSES.items()}, "setup": CLASS_SETUP, "reports": REPORTS, "comparison_profile": comparison_profile.export(), "dictionary_profile": dictionary_profile.export()}, separators=(",", ":")), encoding="utf-8")

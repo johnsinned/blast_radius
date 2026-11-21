@@ -59,7 +59,7 @@ class IdentityTypeTests(unittest.TestCase):
         self.assertEqual(self.kind(Plain()), "identity")
         self.assertEqual(self.kind(Overloaded()), "unsupported")
         self.assertEqual(self.kind(NeOnly()), "unsupported")
-        self.assertEqual(self.kind(42), "unsupported")
+        self.assertEqual(self.kind(42), "builtin_value")
 
     def test_mutating_equality_revokes_the_summary(self):
         class Plain:
@@ -254,6 +254,37 @@ class EquivalenceSelectionTests(DependencyFixture, unittest.TestCase):
 
     def test_multiple_files_disable_equivalence(self):
         selected, _ = self.selector().select(self.edit() + patch_for(self.source, "# comment\n" + self.source))
+        self.assertEqual([t["number"] for t in selected], [99])
+
+    def test_primitive_boundary_keeps_only_changed_results(self):
+        self.source = "def f(x):\n    return x < 10\n\ndef g():\n    return 2\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        self.map["files"]["sqlglot/demo.py"]["lines"]["2"] = 3
+        self.map["comparison_types"]["integer"] = {"name": "builtins:int", "kind": "builtin_value"}
+        self.map["primitive_values"] = [["int", 2], ["int", 10]]
+        self.map["comparisons"]["sqlglot/demo.py:2:11"] = {"global": False, "pairs": [["integer", "integer", 3]], "unknown": 0, "values": [[0, 1, False, 1], [1, 1, True, 2]]}
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace(" < ", " <= ")))
+        self.assertEqual([t["number"] for t in selected], [17])
+
+    def test_builtin_comparison_to_none_is_safe_without_value_fixtures(self):
+        self.map["comparison_types"].update({"integer": {"name": "builtins:int", "kind": "builtin_value"}, "none": {"name": "builtins:NoneType", "kind": "identity"}})
+        self.map["comparisons"]["sqlglot/demo.py:2:11"]["pairs"] = [["integer", "none", 1]]
+        selected, _ = self.selector().select(self.edit())
+        self.assertEqual(selected, [])
+
+    def test_sparse_sets_keep_number_remapping(self):
+        self.map["sets"] = [[], [0], [1], [0, 1]]
+        self.map["comparisons"]["sqlglot/demo.py:2:11"]["global"] = True
+        selected, _ = self.selector().select(self.edit())
+        self.assertEqual([t["number"] for t in selected], [99])
+
+    def test_value_identity_does_not_assume_stable_interning(self):
+        self.source = "def f(x, y):\n    return x == y\n\ndef g():\n    return 2\n"
+        (self.root / "sqlglot/demo.py").write_text(self.source)
+        self.map["comparison_types"]["string"] = {"name": "builtins:str", "kind": "builtin_value"}
+        self.map["primitive_values"] = [["str", "same"]]
+        self.map["comparisons"]["sqlglot/demo.py:2:11"] = {"global": False, "pairs": [["string", "string", 1]], "unknown": 0, "values": [[0, 0, True, 1]]}
+        selected, _ = self.selector().select(patch_for(self.source, self.source.replace(" == ", " is ")))
         self.assertEqual([t["number"] for t in selected], [99])
 
 

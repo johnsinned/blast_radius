@@ -1,16 +1,23 @@
-"""Record original operand types at identity comparisons, without evaluating mutants."""
+"""Record original comparison operands, without applying or evaluating mutants."""
 import ast
 import enum
 import importlib.abc
 import importlib.machinery
 from pathlib import Path
 import sys
+import os
+from semantic_values import OPERATIONS, snapshot, BUILTIN_NONE_EQUALITY_TYPES
+try:
+    from . import dictionary_profile
+except ImportError:
+    import dictionary_profile
 
 CURRENT = lambda: ""
 SITES = {}
 TYPES = {}
 TYPE_CACHE = {}
 HELPER = "__blast_original_identity_comparison__"
+DICT_HELPER = "__blast_original_dictionary__"
 
 
 def describe(value):
@@ -27,6 +34,8 @@ def describe(value):
         canonical = None
         if cls is type(None) or (eq is object.__eq__ and ne is object.__ne__):
             kind = "identity"
+        elif any(cls is builtin for builtin in BUILTIN_NONE_EQUALITY_TYPES):
+            kind = "builtin_value"
         elif type(cls) is enum.EnumType and eq is str.__eq__ and ne is str.__ne__:
             members = list({id(v): v for v in cls.__members__.values()}.values())
             # Canonical enum members must have distinct underlying str payloads.
@@ -38,7 +47,7 @@ def describe(value):
         signature = str(len(TYPE_CACHE)) + ":" + name + ":" + kind
         TYPES[signature] = description
         checks = [(d, d.get("__eq__"), d.get("__ne__")) for d in dictionaries]
-        if cls is type(None) or cls is object or kind == "unsupported":
+        if cls is type(None) or cls is object or kind in ("unsupported", "builtin_value"):
             checks = []
         TYPE_CACHE[key] = signature, canonical, mro, checks
     signature, canonical, mro, checks = TYPE_CACHE[key]
@@ -54,25 +63,52 @@ def describe(value):
 
 def probe(site, operation, left, right):
     context = CURRENT()
-    record = SITES.setdefault(site, {"global": False, "pairs": {}})
+    record = SITES.setdefault(site, {"global": False, "pairs": {}, "values": {}, "unknown": set()})
     if context:
         pair = (describe(left), describe(right))
         record["pairs"].setdefault(pair, set()).add(context)
+        if context not in record["unknown"]:
+            try:
+                values = (snapshot(left), snapshot(right), left is right)
+                if values not in record["values"] and len(record["values"]) >= 32:
+                    raise ValueError("site snapshot limit")
+                record["values"].setdefault(values, set()).add(context)
+            except (ValueError, RecursionError):
+                record["unknown"].add(context)
     else:
         record["global"] = True
-    return left is right if operation == "is" else left is not right
+    return OPERATIONS[operation](left, right)
 
 
 class Instrument(ast.NodeTransformer):
     def __init__(self, relative):
         self.relative = relative
+        self.function_depth = 0
+
+    def visit_FunctionDef(self, node):
+        self.function_depth += 1
+        self.generic_visit(node)
+        self.function_depth -= 1
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
+    def visit_Dict(self, node):
+        self.generic_visit(node)
+        if self.function_depth:
+            return node
+        site = f"{self.relative}:{node.lineno}:{node.col_offset}"
+        return ast.copy_location(ast.Call(func=ast.Name(id=DICT_HELPER, ctx=ast.Load()), args=[ast.Constant(site), node], keywords=[]), node)
 
     def visit_Compare(self, node):
         self.generic_visit(node)
-        if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Is, ast.IsNot)):
+        if os.environ.get("BLAST_READS_ONLY") == "1":
+            return node
+        if len(node.ops) != 1:
             return node
         site = f"{self.relative}:{node.lineno}:{node.col_offset}"
-        operation = "is" if isinstance(node.ops[0], ast.Is) else "is not"
+        operation = type(node.ops[0]).__name__
         return ast.copy_location(ast.Call(func=ast.Name(id=HELPER, ctx=ast.Load()), args=[ast.Constant(site), ast.Constant(operation), node.left, node.comparators[0]], keywords=[]), node)
 
 
@@ -95,6 +131,7 @@ class Loader(importlib.abc.Loader):
         tree = Instrument(relative).visit(ast.parse(source, filename=self.filename))
         ast.fix_missing_locations(tree)
         module.__dict__[HELPER] = probe
+        module.__dict__[DICT_HELPER] = dictionary_profile.observe
         exec(compile(tree, self.filename, "exec", dont_inherit=True), module.__dict__)
 
 
@@ -114,10 +151,23 @@ class Finder(importlib.abc.MetaPathFinder):
 def install(root, current):
     global CURRENT
     CURRENT = current
+    dictionary_profile.CURRENT = current
     if any(name == "sqlglot" or name.startswith("sqlglot.") for name in sys.modules):
         raise RuntimeError("identity profiles require instrumentation before importing sqlglot")
     sys.meta_path.insert(0, Finder(root))
 
 
 def export():
-    return {"types": TYPES, "sites": {site: {"global": value["global"], "pairs": [[left, right, sorted(contexts)] for (left, right), contexts in value["pairs"].items()]} for site, value in SITES.items()}}
+    return {"types": TYPES, "sites": {site: {"global": value["global"], "pairs": [[left, right, sorted(contexts)] for (left, right), contexts in value["pairs"].items()], "values": [[a, b, alias, sorted(contexts)] for (a, b, alias), contexts in value["values"].items()], "unknown": sorted(value["unknown"])} for site, value in SITES.items()}}
+
+
+def is_import_read():
+    """Exclude loader source reads while retaining inspect/linecache reads."""
+    frame = sys._getframe(1)
+    for _ in range(12):
+        if frame is None:
+            return False
+        if frame.f_code is Loader.get_source.__code__:
+            return frame.f_back is not None and frame.f_back.f_code is Loader.exec_module.__code__
+        frame = frame.f_back
+    return False

@@ -8,38 +8,53 @@ falls back to the full suite when evidence is missing or the patch is structural
 It tries all worker counts from 1 through 8 using integer-millisecond costs.
 
 No sample answers, patch hashes, or tables of edit kinds are used by the selector
-or map builder. `tools/evaluate.py` alone reads sample answers for development.
+or map builder. Sample answers are read only by development scoring tools.
 The submitted image has only the selector, the baseline map, and pinned source.
 
 On the 30 downloaded sample commits, the original starter scores **1,210.470 s**
-with zero misses; this selector scores **122.847 s** with zero misses, an **89.9%**
-reduction. The earlier selector scored 170.126 s. The current score is 15.153 s
-below the 138 s target. These are simulated seconds only, before the server adds
-CPU time. The selector took 0.89 s wall time in the native Windows evaluation.
-The submitted repository files total about 9.9 MB, below the 20 MB limit.
+with zero misses; this selector scores **106.308 s** with zero misses. The earlier
+submitted revision scored 122.847 s on these samples. Under the competition's
+Docker restrictions, the candidate used about **0.995 s Python CPU**, for an
+approximately **107.303 s sample total**. The CPU measurement includes a small
+measurement wrapper. The repository files total about 9.5 MB, below the 20 MB limit.
+
+The submitted commit `7230010449e0c07d898e5ff7ab4d4cabd9cef4a4` scored **204.3 s**
+on the hidden practice batch: 203.311 s simulated, about 1.03 s CPU, and no misses.
+The current candidate has not yet been scored on that hidden batch. Its sample
+score cannot establish whether it beats the 136.1 s practice leader.
 
 All 1,621 tests and 25,454 subtests in the instrumented pristine local baseline
 passed, with process-pool serialization included. The challenge's test manifest
 contains 1,620 numbered tests; matching
 uses pytest IDs, so the environment's additional test is not emitted.
 
-The map also records original operand types at identity-comparison sites.
-At runtime the selector checks whether the entire AST difference consists of
-polarity-preserving identity/equality rewrites in one file. It can then exclude
-a profiled test when the recorded types establish the same comparison behavior:
-identity equality on both operands, or canonical string-enum members of the same
-enum class. Overloaded equality, noncanonical enum instances, unprofiled tests,
-import-time operations, other code edits, and multiple changed files retain the
-ordinary dependency selection. Source readers are always retained.
+The map records operand types and bounded primitive input fixtures at comparison
+sites, plus reads of individual keys in static configuration dictionaries. At
+runtime, supported comparison changes are interpreted against those original
+inputs. A value-only dictionary edit selects readers of the changed entries and
+any whole-dictionary consumers. Changes to keys or nonliteral initializers keep
+the ordinary dependency selection. Import-time value dependencies disable this
+pruning. Genuine source inspection is retained; importer source reads are excluded.
 
-Only original operand types are collected: no altered comparison is executed
-or scored during the build, and no patch-to-answer or edit-kind-to-failure table
-is stored. The full current map is reproducible from one pristine baseline run.
-Type evidence, like coverage, is empirical and depends on the test environment.
+The entire AST edit must be covered by these checks, and the commit must change
+one file. Missing profiles, oversized or nonprimitive inputs, overloaded methods,
+uncertain identity/interning, changed operand computations, and unrelated edits
+retain the ordinary dependency selection. Original alias observations are not
+assumed stable between interpreter runs.
 
-Docker is not installed on this machine. The Linux container and its resource
-restrictions have **not** been exercised here. The archive download/extraction
-used by the Dockerfile was tested locally against the pinned checkout.
+No changed operation is evaluated or scored during map collection. Original
+values and reads are recorded; the incoming patch is interpreted only at runtime.
+No patch-to-answer or edit-kind-to-failure table is stored. Evidence is empirical
+and depends on the test environment. The map is collected from the pinned source;
+an independent baseline pass verifies dictionary/file reads without predicate
+instrumentation. All 48 focused regression tests pass in the pinned Linux image.
+Three fresh boundary mutations were also checked against real time-format tests;
+the selector retained all failures found in that bounded validation.
+
+The default Docker entrypoint has been tested as nobody, without a network, with
+a read-only filesystem, 64 MB temporary directory, 2 CPUs, and the scorer's memory
+and process limits. The dependency observations were collected on Windows/Python
+3.13; Linux map regeneration is available below.
 
 ## Run locally without Docker
 
@@ -67,6 +82,14 @@ reported separately; it is not the CPU time the server adds to your score.
 The runtime image installs no testing dependencies and downloads only the
 permitted sqlglot archive at the pinned commit.
 
+On Windows, make is optional. The Docker helper finds a per-user Docker Desktop
+installation and measures the sample under the scorer's restrictions:
+
+```sh
+python tools/docker_sample.py
+python tools/docker_sample.py --skip-build --entrypoint
+```
+
 The first map was collected on Windows with Python 3.13. A separate build recipe
 regenerates it inside the scorer's pinned Linux image and package environment:
 
@@ -86,6 +109,8 @@ To collect a map directly in a Python environment containing the packages in
 ```sh
 python tools/collect_map.py .work/sqlglot
 python tools/compile_map.py .work/sqlglot .work/raw-map.json
+python tools/collect_map.py .work/sqlglot --reads-only --output .work/reads.json
+python tools/apply_read_map.py maps/dependencies.json .work/reads.json
 ```
 
 The collection plugin executes process-pool jobs synchronously with input/output
@@ -93,6 +118,8 @@ pickle round trips, so both execution and serialization are recorded under the
 correct test context. It does not alter files in sqlglot. On Python 3.12 or newer
 it records each executed line once per context with `sys.monitoring`, including
 function entries to capture one-line lambdas. Older Python uses coverage.py.
+Full fixture collection can take substantially longer than the uninstrumented
+suite; it is a development step and is not performed during submission builds.
 The `.work` and `.venv` directories are excluded from both git and Docker.
 
 ---

@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 import tokenize
+from semantic_values import compare, restore, snapshot, dictionary_key_id
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -148,15 +149,68 @@ def identity_only_changes(before, after):
     return changes if same(before, after) and changes else None
 
 
+def semantic_changes(before, after):
+    """Match a whole-file edit made only of supported local pure expressions."""
+    changes = []
+
+    def equal(a, b):
+        return ast.dump(a, include_attributes=False) == ast.dump(b, include_attributes=False)
+
+    def literal(node):
+        value = ast.literal_eval(node)
+        snapshot(value)
+        return value
+
+    def same(a, b):
+        if isinstance(a, ast.AST):
+            if type(a) is not type(b):
+                return False
+            if isinstance(a, ast.Compare) and len(a.ops) == len(b.ops) == 1 and not equal(a, b):
+                operands_same = equal(a.left, b.left) and equal(a.comparators[0], b.comparators[0])
+                if not operands_same and any(isinstance(op, (ast.Is, ast.IsNot)) for op in a.ops + b.ops):
+                    return False
+                try:
+                    for old, new in ((a.left, b.left), (a.comparators[0], b.comparators[0])):
+                        if not equal(old, new):
+                            literal(old)
+                            literal(new)
+                except (ValueError, TypeError, SyntaxError, RecursionError):
+                    return False
+                changes.append(("comparison", a, b))
+                return True
+            if isinstance(a, ast.Dict) and not equal(a, b):
+                if len(a.keys) != len(b.keys) or any(x is None or y is None or not equal(x, y) for x, y in zip(a.keys, b.keys)):
+                    return False
+                try:
+                    keys = [dictionary_key_id(literal(key)) for key in a.keys]
+                    if None in keys or len(keys) != len(set(keys)):
+                        return False
+                    for old, new in zip(a.values, b.values):
+                        if not equal(old, new):
+                            literal(old)
+                            literal(new)
+                except (ValueError, TypeError, SyntaxError, RecursionError):
+                    return False
+                changes.append(("dictionary", a, b))
+                return True
+            return all(same(value, getattr(b, key)) for key, value in ast.iter_fields(a))
+        if isinstance(a, list):
+            return isinstance(b, list) and len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+        return type(a) is type(b) and a == b
+
+    return changes if same(before, after) and changes else None
+
+
 class Selector:
     def __init__(self, tests: list[dict], source: Path, map_path: Path):
         self.tests, self.source = tests, source
         self.all = (1 << len(tests)) - 1
         self.cache = {}
+        self.value_cache = {}
         self.map = json.loads(map_path.read_text("utf-8")) if map_path.exists() else None
         if self.map and self.map.get("pin") != PIN:
             raise ValueError("dependency map targets a different sqlglot commit")
-        self.masks = [int(s, 16) for s in self.map["sets"]] if self.map else []
+        self.masks = [int(s, 16) if isinstance(s, str) else sum(1 << n for n in s) for s in self.map["sets"]] if self.map else []
         # Match by pytest id; the scorer controls test numbers.
         self.numbers = {t["id"]: i for i, t in enumerate(tests)}
         self.translate = [self.numbers.get(name) for name in self.map["tests"]] if self.map else []
@@ -190,23 +244,70 @@ class Selector:
         return self.source.joinpath(*relative.parts).read_text("utf-8")
 
     def equivalent_tests(self, path, before, after):
-        changes = identity_only_changes(before, after)
+        changes = semantic_changes(before, after)
         if not changes or "comparisons" not in self.map:
             return 0
-        safe = self.mask(self.map.get("comparison_profiled_tests"))
+        profiled = self.mask(self.map.get("comparison_profiled_tests"))
+        safe = profiled
         types = self.map["comparison_types"]
-        for comparison in changes:
+        for kind, comparison, replacement in changes:
             site = f"{path}:{comparison.lineno}:{comparison.col_offset}"
+            if kind == "dictionary":
+                profile = self.map.get("dictionaries", {}).get(site)
+                if not profile or profile["global_whole"]:
+                    return 0
+                keys = [dictionary_key_id(ast.literal_eval(key)) for key, a, b in zip(comparison.keys, comparison.values, replacement.values) if ast.dump(a) != ast.dump(b)]
+                if any(key in profile["global_keys"] for key in keys):
+                    return 0
+                affected = self.mask(profile["whole"])
+                for key in keys:
+                    affected |= self.mask(profile["keys"].get(key))
+                safe &= ~affected
+                continue
             profile = self.map["comparisons"].get(site)
             if not profile or profile["global"] or not profile["pairs"]:
                 return 0
+            operands_same = ast.dump(comparison.left) == ast.dump(replacement.left) and ast.dump(comparison.comparators[0]) == ast.dump(replacement.comparators[0])
+            op, new_op = type(comparison.ops[0]).__name__, type(replacement.ops[0]).__name__
+            matching = (op, new_op) in (("Is", "Eq"), ("Eq", "Is"), ("IsNot", "NotEq"), ("NotEq", "IsNot"))
+            type_safe = profiled if operands_same and matching else 0
             for left, right, contexts in profile["pairs"]:
                 a, b = types[left]["kind"], types[right]["kind"]
                 # object equality on both sides is identity equality. Canonical
                 # str-enum members also agree, within the same enum class.
                 equivalent = (a == b == "identity") or (left == right and a == "canonical_str_enum")
+                if types[left].get("name") == "builtins:NoneType" and b in ("identity", "builtin_value", "canonical_str_enum"):
+                    equivalent = True
+                if types[right].get("name") == "builtins:NoneType" and a in ("identity", "builtin_value", "canonical_str_enum"):
+                    equivalent = True
                 if not equivalent:
-                    safe &= ~self.mask(contexts)
+                    type_safe &= ~self.mask(contexts)
+            value_safe = 0
+            if "values" in profile:
+                value_safe = profiled & ~self.mask(profile["unknown"])
+                for left_id, right_id, alias, contexts in profile["values"]:
+                    try:
+                        for value_id in (left_id, right_id):
+                            if value_id not in self.value_cache:
+                                self.value_cache[value_id] = restore(self.map["primitive_values"][value_id])
+                        left, right = self.value_cache[left_id], self.value_cache[right_id]
+                        new_left = left if ast.dump(comparison.left) == ast.dump(replacement.left) else ast.literal_eval(replacement.left)
+                        new_right = right if ast.dump(comparison.comparators[0]) == ast.dump(replacement.comparators[0]) else ast.literal_eval(replacement.comparators[0])
+                        if op in ("Is", "IsNot") or new_op in ("Is", "IsNot"):
+                            # Allocation/interning can vary between runs. Require
+                            # agreement for every alias relation compatible with
+                            # the primitive values, rather than trusting one run.
+                            aliases = (False,)
+                            if type(left) is type(right) and left == right:
+                                aliases = (True,) if left is None or type(left) is bool else (False, True)
+                            equivalent = all(compare(op, left, right, possible) == compare(new_op, new_left, new_right, possible) for possible in aliases)
+                        else:
+                            equivalent = compare(op, left, right) == compare(new_op, new_left, new_right)
+                    except (TypeError, ValueError, OverflowError, KeyError, RecursionError):
+                        equivalent = False
+                    if not equivalent:
+                        value_safe &= ~self.mask(contexts)
+            safe &= type_safe | value_safe
         return safe
 
     def select_file(self, change, allow_equivalence=True):
@@ -262,7 +363,7 @@ class Selector:
                     return self.all, "import-time structural change"
         result = result or self.mask(info["coverage"]) or self.all
         if equivalent:
-            return (result & ~equivalent) | reads, "baseline types certify comparison equivalence"
+            return (result & ~equivalent) | reads, "baseline observations certify local equivalence"
         return result, "baseline dependencies"
 
     def select(self, patch):
